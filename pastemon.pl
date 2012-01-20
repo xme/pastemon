@@ -39,6 +39,7 @@
 # History
 # -------
 # 2012/01/17 Firt version released
+# 2012/01/20 Added '--dump' configuration switch
 #
 # Todo
 # ----
@@ -52,7 +53,7 @@ use Sys::Syslog;
 use POSIX qw(setsid);
 
 my $program = "pastemon.pl";
-my $version = "v1.0";
+my $version = "v1.1";
 my $debug;
 my $help;
 my $ignoreCase;		# By default respect case in strings search
@@ -67,6 +68,7 @@ my @regexList;
 my $pidFile = "/var/run/" . $program . ".pid";
 my $configfile;
 my $syslogFacility = "daemon";
+my $dumpDir;
 my %matches;
 
 $SIG{'TERM'}	= \&sigHandler;
@@ -80,6 +82,7 @@ my $result = GetOptions(
 	"cef-port=s"		=> \$cefPort,
 	"cef-severity=s"	=> \$cefSeverity,
 	"debug"			=> \$debug,
+        "dump=s"		=> \$dumpDir,
 	"facility=s"		=> \$syslogFacility,
 	"help"			=> \$help,
 	"ignore-case"		=> \$ignoreCase,
@@ -90,11 +93,13 @@ if ($help) {
 	print <<__HELP__;
 Usage: $0 --regex=filepath [--facility=daemon ] [--ignore-case][--debug] [--help]
 		[--cef-destination=fqdn|ip] [--cef-port=<1-65535> [--cef-severity=<1-10>]
+                [--dump=/directory]
 Where:
 --cef-destination : Send CEF events to the specified destination (ArcSight)
 --cef-port        : UDP port used by the CEF receiver (default: 514)
 --cef-severity    : Generate CEF events with the specified priority (default: 3)
 --debug           : Enable debug mode (verbose - do not detach)
+--dump            : Save a copy of the pasties in the directory
 --facility        : Syslog facility to send events to (default: daemon)
 --help            : What you're reading now.
 --ignore-case     : Perform case insensitive search
@@ -107,6 +112,12 @@ __HELP__
 
 ($cefDestination) && syslogOutput("Sending CEF events to $cefDestination:$cefPort (severity $cefSeverity)");
 
+# Check if the provided dump directory is writable to us
+if ($dumpDir) {
+	(-w $dumpDir) or die "Directory $dumpDir is not writable: $!";
+	syslogOutput("Using $dumpDir as dump directory");
+	
+}
 # Do not allow multiple running instances!
 if (-r $pidFile) {
 	open(PIDH, "<$pidFile") || die "Cannot read pid file!";
@@ -166,6 +177,11 @@ while(1) {
 						}
 						syslogOutput($buffer);
 						($cefDestination) && sendCEFEvent($pastie);
+
+						# Save pastie content in the dump directory
+						open(DUMP, ">:encoding(UTF-8)", "$dumpDir/$pastie.raw") or die "Cannot write to $dumpDir/$pastie.raw : $!";
+						print DUMP "$content";
+						close(DUMP);
 						push(@seenPasties, $pastie);
 					}
 				}
