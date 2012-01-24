@@ -6,7 +6,7 @@ brucon
 -- phpMyAdmin SQL Dump
 -- MySQL dump
 -----BEGIN CERTIFICATE-----
-belgium
+belgium _EXCLUDE_ france
 #lulzsec
 #antisec
 #anonymous
