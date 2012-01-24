@@ -12,8 +12,11 @@ http://blog.rootshell.be/2012/01/17/monitoring-pastebin-com-within-your-siem/
 History
 -------
 
-18/01/2012	v1.0	Initial release
-20/01/2012	v1.1	Added a '--dump' configuration switch to save matching pasties in
-			a directory. This is to keep the pasties posted with an expiration
-			date (example: for later review)
-
+2012/01/18	v1.0	- Initial release
+2012/01/20	v1.1	- Added a '--dump' configuration switch to save matching pasties in
+			  a directory. This is to keep the pasties posted with an expiration
+			  date (example: for later review)
+2012/01/21	v1.2	- Fixed a bug affecting the case sensitivity search
+			- New feature: an exception can be associated to a regular expression
+			  in the configuration file. The syntax is: "regex1 _EXCLUDE_ regex2" 
+			  This could prevent some false positive matches.

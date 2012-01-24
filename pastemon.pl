@@ -38,8 +38,10 @@
 #
 # History
 # -------
-# 2012/01/17 Firt version released
-# 2012/01/20 Added '--dump' configuration switch
+# 2012/01/17	Firt version released
+# 2012/01/20	Added '--dump' configuration switch
+# 2012/01/21	Fixed a bug with case sensitivity search
+# 2012/01/23	Added support for "excluded" regular expressions
 #
 # Todo
 # ----
@@ -53,7 +55,7 @@ use Sys::Syslog;
 use POSIX qw(setsid);
 
 my $program = "pastemon.pl";
-my $version = "v1.1";
+my $version = "v1.2";
 my $debug;
 my $help;
 my $ignoreCase;		# By default respect case in strings search
@@ -162,10 +164,37 @@ while(1) {
 					undef(%matches);	# Reset the matches regex/counters
 					my $i = 0;
 					foreach $regex (@regexList) {
-						my $count += () = $content =~ /$regex/g;
-						if ($count > 0) {
-							$matches{$i} = [ ( $regex, $count ) ];
-							$i++;
+						# Search for an exception regex
+						my ($preRegex, $postRegex) = split("_EXCLUDE_", $regex);
+						$preRegex =~ s/^\s+//; $preRegex =~ s/\s+$//;
+						$postRegex =~ s/^\s+//; $postRegex =~ s/\s+$//;
+						my $preCount = 0;
+						if ($ignoreCase) {
+							$preCount += () = $content =~ /$preRegex/gi;
+						}
+						else {
+							$preCount += () = $content =~ /$preRegex/g;
+						}
+						if ($preCount > 0) {
+							# If exception defined, search for NON matches
+							if ($postRegex) {
+								my $postCount = 0;
+								if ($ignoreCase) {
+									$postCount += () = $content =~ /$postRegex/gi;
+								}
+								else {
+									$postCount += () = $content =~ /$postRegex/g;
+								}
+								if (! $postCount) {
+									# No match for $postRegex!
+									$matches{$i} = [ ( $preRegex, $preCount ) ];
+									$i++;
+								}
+							}
+							else {
+								$matches{$i} = [ ( $preRegex, $preCount ) ];
+								$i++;
+							}
 						}
 					}
 					if ($i) {
@@ -186,7 +215,7 @@ while(1) {
 					}
 				}
 				# Wait a random number of seconds to not mess with pastebin.com webmasters
-				sleep(int(rand(5)));
+				sleep(int(rand(3)));
 			}
 		}
 	}
@@ -194,9 +223,8 @@ while(1) {
 		syslogOutput("Cannot fetch pasties");
 	}
 	purgeOldPasties($maxPasties);
-	($debug) && print STDERR "+++ ZzZz...\n";
 	# Wait a random number of seconds to not mess with pastebin.com webmasters
-	sleep(int(rand(15)));
+	sleep(int(rand(5)));
 }
 
 #
@@ -207,14 +235,11 @@ sub fetchLastPasties {
 	my $ua = LWP::UserAgent->new;
 	$ua->timeout(10);
 	$ua->env_proxy;
+	$ua->agent("Mozilla/4.0 (compatible; MSIE 8.0; Windows NT 5.1");
 	my $response = $ua->get("http://pastebin.com/archive");
 	if ($response->is_success) {
 		# Load the pasties into an array
-		if ($ignoreCase) {
-		@pasties = $response->decoded_content =~ /<td class=\"icon\"><a href=\"\/(\w+)\">.+<\/a><\/td>/gi;
-		} else {
 		@pasties = $response->decoded_content =~ /<td class=\"icon\"><a href=\"\/(\w+)\">.+<\/a><\/td>/g;
-		}
 		return(0);
 	}
 	syslogOutput("Cannot fetch pasties: " . $response->status_line);
@@ -229,6 +254,7 @@ sub fetchPastie {
 	my $ua = LWP::UserAgent->new;
 	$ua->timeout(10);
 	$ua->env_proxy;
+	$ua->agent("Mozilla/4.0 (compatible; MSIE 8.0; Windows NT 5.1");
 	my $response = $ua->get("http://pastebin.com/raw.php?i=" . $pastie);
 	if ($response->is_success) {
 		return $response->decoded_content;
