@@ -42,9 +42,8 @@
 # 2012/01/20	Added '--dump' configuration switch
 # 2012/01/21	Fixed a bug with case sensitivity search
 # 2012/01/23	Added support for "excluded" regular expressions
-#
-# Todo
-# ----
+# 2012/01/26	Added '--pidfile' configuration switch
+#		Added '--sample' configuration switch
 #
 
 use strict;
@@ -52,10 +51,11 @@ use Getopt::Long;
 use IO::Socket;
 use LWP::UserAgent;
 use Sys::Syslog;
+use Encode;
 use POSIX qw(setsid);
 
 my $program = "pastemon.pl";
-my $version = "v1.2";
+my $version = "v1.3";
 my $debug;
 my $help;
 my $ignoreCase;		# By default respect case in strings search
@@ -67,10 +67,11 @@ my @pasties;
 my @seenPasties;
 my $maxPasties = 500;
 my @regexList;
-my $pidFile = "/var/run/" . $program . ".pid";
+my $pidFile = "/var/run/pastemon.pid";
 my $configfile;
 my $syslogFacility = "daemon";
 my $dumpDir;
+my $sampleSize;
 my %matches;
 
 $SIG{'TERM'}	= \&sigHandler;
@@ -88,14 +89,16 @@ my $result = GetOptions(
 	"facility=s"		=> \$syslogFacility,
 	"help"			=> \$help,
 	"ignore-case"		=> \$ignoreCase,
+	"pidfile=s"		=> \$pidFile,
 	"regex=s"		=> \$configfile,
+	"sample=s"		=> \$sampleSize,
 );
 
 if ($help) {
 	print <<__HELP__;
 Usage: $0 --regex=filepath [--facility=daemon ] [--ignore-case][--debug] [--help]
 		[--cef-destination=fqdn|ip] [--cef-port=<1-65535> [--cef-severity=<1-10>]
-                [--dump=/directory]
+                [--dump=/directory] [--pidfile=file] [--sample=bufferlength]
 Where:
 --cef-destination : Send CEF events to the specified destination (ArcSight)
 --cef-port        : UDP port used by the CEF receiver (default: 514)
@@ -105,7 +108,9 @@ Where:
 --facility        : Syslog facility to send events to (default: daemon)
 --help            : What you're reading now.
 --ignore-case     : Perform case insensitive search
+--pidfile         : Location of the PID file (default: /var/run/pastemon.pid)
 --regex           : Configuration file with regular expressions (send SIGUSR1 to reload)
+--sample          : Display a sample of match data (# of bytes before and after the mathch)
 __HELP__
 	exit 0;
 }
@@ -126,6 +131,12 @@ if (-r $pidFile) {
 	my $currentpid = <PIDH>;
 	close(PIDH);
 	die "$program already running (PID $currentpid)";
+}
+
+# Verifiy sampleSize format if specified
+if ($sampleSize) {
+	die "Sample buffer lenghth must be an integer!" if not $sampleSize =~ /\d+/;
+	syslogOutput("Dumping $sampleSize bytes samples");
 }
 
 loadRegexFromFile($configfile) || die "Cannot load regex from file $configfile";
@@ -166,16 +177,31 @@ while(1) {
 					foreach $regex (@regexList) {
 						# Search for an exception regex
 						my ($preRegex, $postRegex) = split("_EXCLUDE_", $regex);
+						my $sampleData;
+						my ($startPos, $endPos);
 						$preRegex =~ s/^\s+//; $preRegex =~ s/\s+$//;
 						$postRegex =~ s/^\s+//; $postRegex =~ s/\s+$//;
 						my $preCount = 0;
 						if ($ignoreCase) {
 							$preCount += () = $content =~ /$preRegex/gi;
+							$startPos = $-[0];
+							$endPos = $+[0];
 						}
 						else {
 							$preCount += () = $content =~ /$preRegex/g;
+							$startPos = $-[0];
+							$endPos = $+[0];
 						}
 						if ($preCount > 0) {
+							if ($sampleSize) {
+								# Optional: extract a sample of the data
+								$startPos = (($startPos - $sampleSize) < 0) ? 0 : ($startPos - $sampleSize);
+								$sampleData = encode('UTF8', substr($content, $startPos, ($endPos - $startPos) + $sampleSize));
+								# Sanitize the data
+								$sampleData =~ s///g;
+								$sampleData =~ s/\n/\\n/g;
+								$sampleData =~ s/\t/\\t/g;
+							}
 							# If exception defined, search for NON matches
 							if ($postRegex) {
 								my $postCount = 0;
@@ -187,12 +213,12 @@ while(1) {
 								}
 								if (! $postCount) {
 									# No match for $postRegex!
-									$matches{$i} = [ ( $preRegex, $preCount ) ];
+									$matches{$i} = [ ( $preRegex, $preCount, $sampleData ) ];
 									$i++;
 								}
 							}
 							else {
-								$matches{$i} = [ ( $preRegex, $preCount ) ];
+								$matches{$i} = [ ( $preRegex, $preCount, $sampleData ) ];
 								$i++;
 							}
 						}
@@ -203,6 +229,10 @@ while(1) {
 						my $key;
 						for $key (keys %matches) {
 							$buffer = $buffer . $matches{$key}[0] . " (" . $matches{$key}[1] . " times) ";
+						}
+						if ($sampleSize) {
+							# Optional: Add sample of data
+							$buffer = $buffer . "| Sample: " . $matches{0}[2];
 						}
 						syslogOutput($buffer);
 						($cefDestination) && sendCEFEvent($pastie);
@@ -218,9 +248,6 @@ while(1) {
 				sleep(int(rand(3)));
 			}
 		}
-	}
-	else {
-		syslogOutput("Cannot fetch pasties");
 	}
 	purgeOldPasties($maxPasties);
 	# Wait a random number of seconds to not mess with pastebin.com webmasters
