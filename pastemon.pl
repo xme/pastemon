@@ -44,6 +44,8 @@
 # 2012/01/23	Added support for "excluded" regular expressions
 # 2012/01/26	Added '--pidfile' configuration switch
 #		Added '--sample' configuration switch
+# 2012/01/30	Bug fix with CEF events (index starting at 0)
+# 2012/02/15	Added notification of proxy usage
 #
 
 use strict;
@@ -55,7 +57,7 @@ use Encode;
 use POSIX qw(setsid);
 
 my $program = "pastemon.pl";
-my $version = "v1.3";
+my $version = "v1.4";
 my $debug;
 my $help;
 my $ignoreCase;		# By default respect case in strings search
@@ -158,6 +160,9 @@ syslogOutput("Running with PID $$");
 open(PIDH, ">$pidFile") || die "Cannot write PID file $pidFile: $!";
 print PIDH "$$";
 close(PIDH);
+
+# Notify if HTTP proxy settings detected
+($ENV{'HTTP_PROXY'}) && syslogOutput("Using detected HTTP proxy: " . $ENV{'HTTP_PROXY'});
 
 # ---------
 # Main loop
@@ -363,7 +368,7 @@ sub sendCEFEvent {
 			$pastie
 	);
  	my $key;
-	my $i = 0;
+	my $i = 1;
 	for $key (keys %matches) {
 		$buffer = $buffer . "cs" . $i . "=" . $matches{$key}[0] . " cs" . $i . "Label=Regex". $i . "Name cn" . $i . "=" . $matches{$key}[1]. " cn" . $i . "Label=Regex" . $i . "Count ";
 		if (++$i > 6) {

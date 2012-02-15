@@ -33,3 +33,7 @@ v1.3 - 2012/01/26
   value of the pastie.  Example:
   Found in http://pastebin.com/raw.php?i=Q8pQRHKW : belgium (2 times) | Sample: g(0) ""\n  [32] => string(11) "Belgium(32)"\n  [31] => string(14) "Ne
   
+v1.4 - 2012/02/15
+-----------------
+- Fixed a bug with CEF events: custome fields start at 1 not 0! (Thanks to Heiko Hansen for the report)
+- Notify the presence of a proxy variable (HTTP_PROXY) 
