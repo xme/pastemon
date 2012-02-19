@@ -46,6 +46,7 @@
 #		Added '--sample' configuration switch
 # 2012/01/30	Bug fix with CEF events (index starting at 0)
 # 2012/02/15	Added notification of proxy usage
+# 2012/02/19	Adapted regex to mach pasties in the new site layout
 #
 
 use strict;
@@ -57,7 +58,7 @@ use Encode;
 use POSIX qw(setsid);
 
 my $program = "pastemon.pl";
-my $version = "v1.4";
+my $version = "v1.5";
 my $debug;
 my $help;
 my $ignoreCase;		# By default respect case in strings search
@@ -271,7 +272,9 @@ sub fetchLastPasties {
 	my $response = $ua->get("http://pastebin.com/archive");
 	if ($response->is_success) {
 		# Load the pasties into an array
-		@pasties = $response->decoded_content =~ /<td class=\"icon\"><a href=\"\/(\w+)\">.+<\/a><\/td>/g;
+		# @pasties = $response->decoded_content =~ /<td class=\"icon\"><a href=\"\/(\w+)\">.+<\/a><\/td>/g;
+		# New format (2012/02/19):
+		@pasties = $response->decoded_content =~ /<a href=\"\/(\w{8})\">.+<\/a><\/td>/g;
 		return(0);
 	}
 	syslogOutput("Cannot fetch pasties: " . $response->status_line);

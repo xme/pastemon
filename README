@@ -37,3 +37,7 @@ v1.4 - 2012/02/15
 -----------------
 - Fixed a bug with CEF events: custome fields start at 1 not 0! (Thanks to Heiko Hansen for the report)
 - Notify the presence of a proxy variable (HTTP_PROXY) 
+
+v1.5 - 2012/02/19
+-----------------
+- Fixed the regex to grab pasties from the archive page. (HTML code changed)
