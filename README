@@ -41,3 +41,10 @@ v1.4 - 2012/02/15
 v1.5 - 2012/02/19
 -----------------
 - Fixed the regex to grab pasties from the archive page. (HTML code changed)
+
+v1.6 - 2012/02/21
+-----------------
+- Added a detection of "slow down" messages returned by Pastebin (add a small pause)
+- Added support for Wordpress XMLRPC 
+- Added support for random proxies
+- Some bug fixes
