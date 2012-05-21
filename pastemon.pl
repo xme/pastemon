@@ -49,6 +49,13 @@
 # 2012/02/19	Adapted regex to mach pasties in the new site layout
 # 2012/02/21	Added detection of pastebin "slow down" message
 # 2012/03/09	Added support for Wordpress XMLRPC and support for proxy randomization
+# 2012/04/08	Added support for "included" regular expressions
+# 2012/04/13	Fixed in bug in getRegexDesc()
+# 2012/04/20	Added support for comments ('#') in the regex configuration file
+# 2012/05/11	Moved configuration parameters from command line switches to an XML file
+#		Added matching regex in dump files
+#		Added SMTP notifications
+# 2012/05/15	Added distance check to detect duplicate pasties (using Jaro-Winkler algorithm)
 #
 
 use strict;
@@ -59,10 +66,14 @@ use HTML::Entities;
 use Sys::Syslog;
 use Encode;
 use WordPress::XMLRPC;
+use XML::XPath;
+use XML::XPath::XMLParser;
+use Net::SMTP;
 use POSIX qw(setsid);
+use Text::JaroWinkler qw(strcmp95);
 
 my $program = "pastemon.pl";
-my $version = "v1.6";
+my $version = "v1.7";
 my $debug;
 my $help;
 my $ignoreCase;		# By default respect case in strings search
@@ -70,22 +81,31 @@ my $cefDestination;	# Send CEF events to this destination:port
 my $cefPort = 514;
 my $cefSeverity = 3;
 my $caught = 0;
+my $httpTimeout = 10;	# Default HTTP timeout
 my @pasties;
 my @seenPasties;
 my $maxPasties = 500;
 my @regexList;
 my @regexDesc;
 my $pidFile = "/var/run/pastemon.pid";
-my $configFile;
+my $configFile;		# Main XML configuration file
+my $regexFile;		# Regular expressions definitions
 my $wpConfigFile;
-my $proxyConfigFile;
+my $proxyFile;
 my @proxies;
 
 my $wpSite;		# Wordpress settings
 my $wpUser;
 my $wpPass;
 my $wpCategory;
-my $wpTags;
+
+my $smtpServer;		# SMTP settings
+my $smtpFrom;
+my $smtpRecipient;
+my $smtpSubject;
+
+my $distanceMin;
+my $distanceMaxSize;
 
 my $syslogFacility = "daemon";
 my $dumpDir;
@@ -99,55 +119,28 @@ $SIG{'USR1'}	= \&sigReload;
 
 # Process arguments
 my $result = GetOptions(
-	"cef-destination=s"	=> \$cefDestination,
-	"cef-port=s"		=> \$cefPort,
-	"cef-severity=s"	=> \$cefSeverity,
 	"debug"			=> \$debug,
-        "dump=s"		=> \$dumpDir,
-	"facility=s"		=> \$syslogFacility,
 	"help"			=> \$help,
-	"ignore-case"		=> \$ignoreCase,
-	"pidfile=s"		=> \$pidFile,
-	"regex=s"		=> \$configFile,
-	"wp-config=s"		=> \$wpConfigFile,
-	"proxy-config=s"	=> \$proxyConfigFile,
-	"sample=s"		=> \$sampleSize,
+	"config=s"		=> \$configFile,
 );
 
 if ($help) {
 	print <<__HELP__;
-Usage: $0 --regex=filepath [--facility=daemon ] [--ignore-case][--debug] [--help]
-		[--cef-destination=fqdn|ip] [--cef-port=<1-65535> [--cef-severity=<1-10>]
-                [--dump=/directory] [--pidfile=file] [--wp-config=file]
-                [--proxy-config=file] [--sample=bufferlength]
+Usage: $0 --config=filepath [--debug] [--help]
 Where:
---cef-destination : Send CEF events to the specified destination (ArcSight)
---cef-port        : UDP port used by the CEF receiver (default: 514)
---cef-severity    : Generate CEF events with the specified priority (default: 3)
---debug           : Enable debug mode (verbose - do not detach)
---dump            : Save a copy of the pasties in the directory
---facility        : Syslog facility to send events to (default: daemon)
---help            : What you're reading now.
---ignore-case     : Perform case insensitive search
---pidfile         : Location of the PID file (default: /var/run/pastemon.pid)
---proxy-config    : Configuration with proxies to use (random)
---regex           : Configuration file with regular expressions (send SIGUSR1 to reload)
---sample          : Display a sample of match data (# of bytes before and after the mathch)
---wp-config       : Configuration file for Wordpress XMLRPC import
+--config : Specify the XML configuration file
+--debug  : Enable debug mode (verbose - do not detach)
+--help   : What you're reading now.
 __HELP__
 	exit 0;
 }
+
+parseXMLConfigFile($configFile);
 
 ($debug) && print STDERR "+++ Running in foreground.\n";
 
 ($cefDestination) && syslogOutput("Sending CEF events to $cefDestination:$cefPort (severity $cefSeverity)");
 
-# Check if the provided dump directory is writable to us
-if ($dumpDir) {
-	(-w $dumpDir) or die "Directory $dumpDir is not writable: $!";
-	syslogOutput("Using $dumpDir as dump directory");
-	
-}
 # Do not allow multiple running instances!
 if (-r $pidFile) {
 	open(PIDH, "<$pidFile") || die "Cannot read pid file!";
@@ -156,21 +149,7 @@ if (-r $pidFile) {
 	die "$program already running (PID $currentpid)";
 }
 
-# Verifiy sampleSize format if specified
-if ($sampleSize) {
-	die "Sample buffer length must be an integer!" if not $sampleSize =~ /\d+/;
-	syslogOutput("Dumping $sampleSize bytes samples");
-}
-
-# Load a Wordpress config file
-if ($wpConfigFile) {
-	loadWPConfigFile($wpConfigFile) || die "Cannot load Wordpress configuration from file $wpConfigFile";
-	(!$wpSite || !$wpUser || !$wpPass || !$wpCategory) && die "Incomplete Wordpress configuration in $wpConfigFile";
-	($sampleSize) || die "A sample buffer length must be given with Wordpress output";
-	syslogOutput("Dumping data to $wpSite/xmlrpc.php");
-}
-
-loadRegexFromFile($configFile) || die "Cannot load regex from file $configFile";
+loadRegexFromFile($regexFile) || die "Cannot load regex from file $regexFile";
 
 if (!$debug) {
 	my $pid = fork;
@@ -192,12 +171,9 @@ close(PIDH);
 
 # Notify if HTTP proxy settings detected
 if ($ENV{'HTTP_PROXY'}) {
-	($proxyConfigFile) && die "The HTTP_PROXY environment variable conflicts with the use of a proxies list";
+	($proxyFile) && die "The HTTP_PROXY environment variable conflicts with the use of a proxies list";
 	syslogOutput("Using detected HTTP proxy: " . $ENV{'HTTP_PROXY'});
 }
-
-# Load proxies config file
-loadProxyFromFile($proxyConfigFile) || die "Cannot load proxy configuration from file $proxyConfigFile";
 
 # ---------
 # Main loop
@@ -222,11 +198,11 @@ while(1) {
 						my $i = 0;
 						foreach $regex (@regexList) {
 							# Search for an exception regex
-							my ($preRegex, $postRegex) = split("_EXCLUDE_", $regex);
+							my ($preRegex, $postRegex) = split(/_EXCLUDE_|_INCLUDE_/, $regex);
+							$preRegex = trim($preRegex);	# Remove leading/trailing spaces
+							$postRegex = trim($postRegex);
 							my $sampleData;
 							my ($startPos, $endPos);
-							$preRegex =~ s/^\s+//; $preRegex =~ s/\s+$//;
-							$postRegex =~ s/^\s+//; $postRegex =~ s/\s+$//;
 							my $preCount = 0;
 							if ($ignoreCase) {
 								$preCount += () = $content =~ /$preRegex/gi;
@@ -253,8 +229,10 @@ while(1) {
 									else {
 										$postCount += () = $content =~ /$postRegex/g;
 									}
-									if (! $postCount) {
-										# No match for $postRegex!
+									if ((! $postCount && $regex =~ /_EXCLUDE_/) ||
+									    (  $postCount && $regex =~ /_INCLUDE_/)) {
+										# No match for $postRegex with _EXCLUDE_ keyword or
+										# Matches for $postRegex with _INCLUDE_ keyword
 										$matches{$i} = [ ( $preRegex, $preCount, $sampleData ) ];
 										$i++;
 									}
@@ -266,37 +244,60 @@ while(1) {
 							}
 						}
 						if ($i) {
-							# Generate the results based on matches
-							my $buffer = "Found in http://pastebin.com/raw.php?i=" . $pastie . " : ";
-							my $key;
-							for $key (keys %matches) {
-								$buffer = $buffer . $matches{$key}[0] . " (" . $matches{$key}[1] . " times) ";
-							}
-							if ($sampleSize) {
-								# Optional: Add sample of data
-								my $safeData = $matches{0}[2];
-								# Sanitize the data
-								$safeData =~ s///g;
-								$safeData =~ s/\n/\\n/g;
-								$safeData =~ s/\t/\\t/g;
-								$buffer = $buffer . "| Sample: " . $safeData;
-							}
-							syslogOutput($buffer);
+							# Try to find a corresponding pastie?
+							if (!FuzzyMatch($content))
+							{
+								# Generate the results based on matches
+								my $buffer = "Found in http://pastebin.com/raw.php?i=" . $pastie . " : ";
+								my $key;
+								for $key (keys %matches) {
+									$buffer = $buffer . $matches{$key}[0] . " (" . $matches{$key}[1] . " times) ";
+								}
+								if ($sampleSize) {
+									# Optional: Add sample of data
+									my $safeData = $matches{0}[2];
+									# Sanitize the data
+									$safeData =~ s///g;
+									$safeData =~ s/\n/\\n/g;
+									$safeData =~ s/\t/\\t/g;
+									$buffer = $buffer . "| Sample: " . $safeData;
+								}
+								syslogOutput($buffer);
 
-							# Generating CEF event (if configured)
-							($cefDestination) && sendCEFEvent($pastie);
-
-							# Generating blog post (if configured)
-							($wpSite) && createBlogPost($pastie);
+								# Generating CEF event (if configured)
+								($cefDestination) && sendCEFEvent($pastie);
 	
-							if ($dumpDir) {
-								# Save pastie content in the dump directory
-								open(DUMP, ">:encoding(UTF-8)", "$dumpDir/$pastie.raw") or die "Cannot write to $dumpDir/$pastie.raw : $!";
-								print DUMP "$content";
-								close(DUMP);
-							}
+								# Generating blog post (if configured)
+								($wpSite) && createBlogPost($pastie);
+	
+								# Send SMTP notification (if configured)
+								if ($smtpServer) {
+									my $smtp = Net::SMTP->new($smtpServer);
+									$smtp->mail($smtpFrom);
+									$smtp->to($smtpRecipient);
+									$smtp->data();
+									my $smtpBody = "To: $smtpRecipient\nSubject: $smtpSubject\n\n";
+									for $key (keys %matches) {
+										$smtpBody = $smtpBody . "Matched: " . $matches{$key}[0] . " (" . $matches{$key}[1] . " time(s))\n";
+									}
+									$smtpBody = $smtpBody . "\n" . $content;
+									$smtp->datasend($smtpBody);
+									$smtp->dataend();
+									$smtp->quit();
+								}
 
-							push(@seenPasties, $pastie);
+								# Save pastie content in the dump directory (if configured)
+								if ($dumpDir) {
+									open(DUMP, ">:encoding(UTF-8)", "$dumpDir/$pastie.raw") or die "Cannot write to $dumpDir/$pastie.raw : $!";
+									for $key (keys %matches) {
+										print DUMP "Matched: " . $matches{$key}[0] . " (" . $matches{$key}[1] . " time(s))\n";
+									}
+									print DUMP "\n$content";
+									close(DUMP);
+								}
+
+								push(@seenPasties, $pastie);
+							}
 						}
 						# Wait a random number of seconds to not mess with pastebin.com webmasters
 						sleep(int(rand(5)));
@@ -311,6 +312,142 @@ while(1) {
 	sleep(int(rand(5)));
 }
 
+# 
+# Load the configuration from provided XML file
+#
+sub parseXMLConfigFile {
+	my $configFile = shift;
+	(-r $configFile) || die "Cannot load XML file $configFile: $!";
+
+	($debug) && print STDERR "+++ Loading XML file $configFile.\n";
+	my $xml = XML::XPath->new(filename => "$configFile");
+	my $buff;
+
+	# Reset settings
+	undef $pidFile;
+	undef $sampleSize;
+	undef $dumpDir;
+	undef $proxyFile;
+	undef $cefDestination;
+	undef $cefPort;
+	undef $cefSeverity;
+	undef $smtpServer;
+	undef $smtpFrom;
+	undef $smtpRecipient;
+	undef $smtpSubject;
+	undef $wpSite;
+	undef $wpUser;
+	undef $wpPass;
+	undef $wpCategory;
+	undef $distanceMin;
+	undef $distanceMaxSize;
+
+	# Core Parameters
+	my $nodes = $xml->find('/pastemon/core');
+	foreach my $node ($nodes->get_nodelist) {
+		$buff			= $node->find('ignore-case')->string_value;
+		if (lc($buff) eq "yes" || $buff eq "1") {
+			$ignoreCase++;
+			($debug) && print STDERR "+++ Non-sensitive search enabled.\n";
+		}
+		$pidFile		= $node->find('pid-file')->string_value;
+		$regexFile		= $node->find('regex-file')->string_value;
+		$sampleSize		= $node->find('sample-size')->string_value;
+		$dumpDir		= $node->find('dump-directory')->string_value;
+		$proxyFile		= $node->find('proxy-config')->string_value;
+		$httpTimeout		= $node->find('http-timeout')->string_value;
+		$distanceMin		= $node->find('distance-min')->string_value;
+		$distanceMaxSize	= $node->find('distance-max-size')->string_value;
+	}
+
+	# CEF Parameters
+	my $nodes = $xml->find('/pastemon/cef-output');
+	foreach my $node ($nodes->get_nodelist) {
+		$cefDestination		= $node->find('destination')->string_value;
+		$cefPort		= $node->find('port')->string_value;
+		$cefSeverity		= $node->find('severity')->string_value;
+	}
+
+	# Syslog Parameters
+	my $nodes = $xml->find('/pastemon/syslog-output');
+	foreach my $node ($nodes->get_nodelist) {
+		$syslogFacility		= $node->find('facility')->string_value;
+	}
+
+	# Wordpress Parameters
+	my $nodes = $xml->find('/pastemon/wordpress-output');
+	foreach my $node ($nodes->get_nodelist) {
+		$wpSite			= $node->find('site')->string_value;
+		$wpUser			= $node->find('user')->string_value;
+		$wpPass			= $node->find('password')->string_value;
+		$wpCategory		= $node->find('category')->string_value;
+	}
+
+	# SMTP Parameters
+	my $nodes = $xml->find('/pastemon/smtp-output');
+	foreach my $node ($nodes->get_nodelist) {
+		$smtpServer		= $node->find('smtp-server')->string_value;
+		$smtpFrom		= $node->find('from')->string_value;
+		$smtpRecipient		= $node->find('recipient')->string_value;
+		$smtpSubject		= $node->find('subject')->string_value;
+	}
+
+	# ---------------------
+	# Parameters validation
+	# ---------------------
+
+	# Check if the provided dump directory is writable to us
+	if ($dumpDir) {
+		(-w $dumpDir) or die "Directory $dumpDir is not writable: $!";
+		syslogOutput("Using $dumpDir as dump directory");
+	}
+
+	# Verifiy sampleSize format if specified
+	if ($sampleSize) {
+		die "Sample buffer length must be an integer!" if not $sampleSize =~ /\d+/;
+		syslogOutput("Dumping $sampleSize bytes samples");
+	}
+
+	# Verify the HTTP timeout if specified
+	if ($httpTimeout) {
+		die "HTTP timeout must be an integer!" if not $httpTimeout =~ /\d+/;
+		syslogOutput("HTTP timeout: $httpTimeout seconds");
+	}
+
+	# Verify Wordpress config
+	if ($wpSite) {
+		(!$wpSite || !$wpUser || !$wpPass || !$wpCategory) && die "Incomplete Wordpress configuration";
+		($sampleSize) || die "A sample buffer length must be given with Wordpress output";
+		syslogOutput("Dumping data to $wpSite/xmlrpc.php");
+	}
+
+	# Verify SMTP config
+	if ($smtpServer) {
+		(!$smtpServer || !$smtpFrom || !$smtpRecipient || !$smtpSubject) && die "Incomplete SMTP configuration";
+		syslogOutput("Sending SMTP notifications to <".$smtpRecipient.">");
+	}
+
+	# Load proxies
+	if ($proxyFile) {
+		(-r $proxyFile) or die "Cannot read proxy configuration file $proxyFile: $!";
+		loadProxyFromFile($proxyFile) || die "Cannot load proxies from file $proxyFile";
+	}
+
+	# Distance
+	if ($distanceMin) {
+		(!$dumpDir) && die "A dump directory must be configured to use the distance check";
+		($distanceMin > 0 && $distanceMin < 1) or die "Minimum distance must be between 0 and 1";
+		if ($distanceMaxSize) {
+			die "Distance max size must be an integer!" if not $distanceMaxSize =~ /\d+/;
+			syslogOutput("Enabled duplicate detection with distance of $distanceMin (size limit: $distanceMaxSize bytes)");
+		} else {
+		syslogOutput("Enabled duplicate detection with distance of $distanceMin");
+		}
+	}
+
+	return;
+}
+
 #
 # Download the latest pasties and load them in a Perl array
 # (http://pastebin.com/archive)
@@ -318,13 +455,13 @@ while(1) {
 sub fetchLastPasties {
 	my $tempProxy;
 	my $ua = LWP::UserAgent->new;
-	$ua->timeout(10);
+	$ua->timeout($httpTimeout);
 	if (@proxies) {
 		$tempProxy = selectRandomProxy();
 		$ua->proxy('http', $tempProxy);
 	}
 	else {
-		$ua->env_proxy;
+		($ENV{'HTTP_PROXY'}) && $ua->env_proxy;
 	}
 	$ua->agent("Mozilla/4.0 (compatible; MSIE 8.0; Windows NT 5.1");
 	my $response = $ua->get("http://pastebin.com/archive");
@@ -348,13 +485,13 @@ sub fetchPastie {
 	my $tempProxy;
 	my $pastie = shift;
 	my $ua = LWP::UserAgent->new;
-	$ua->timeout(10);
+	$ua->timeout($httpTimeout);
 	if (@proxies) {
 		$tempProxy = selectRandomProxy();
 		$ua->proxy('http', $tempProxy);
 	}
 	else {
-		$ua->env_proxy;
+		($ENV{'HTTP_PROXY'}) && $ua->env_proxy;
 	}
 	$ua->agent("Mozilla/4.0 (compatible; MSIE 8.0; Windows NT 5.1");
 	my $response = $ua->get("http://pastebin.com/raw.php?i=" . $pastie);
@@ -379,7 +516,7 @@ sub loadRegexFromFile {
 	open(REGEX_FD, "$file") || die "Cannot open file $file : $!";
 	while(<REGEX_FD>) {
 		chomp;
-		if (length > 0) {
+		if (length > 0 && !($_ =~ /^#/)) {
 			# Default format regex<TAB>description
 			my ($regex, $desc) = split(/[\t]+/, $_);
 			push(@regexList, $regex);
@@ -387,41 +524,6 @@ sub loadRegexFromFile {
 		}
 	}
 	syslogOutput("Loaded " . @regexList . " regular expressions from " . $file);
-	return(1);
-}
-
-#
-# Load Wordpress configuration
-#
-sub loadWPConfigFile {
-	my $file = shift;
-	die "A configuration file is required" unless defined($file);
-	open(WPCONFIG_FD, "$file") || die "Cannot open file $file : $!";
-	while(<WPCONFIG_FD>) {
-		chomp;
-		$_=~s/\s//g;
-		my ($keyword, $value) = split("=", $_);
-		$keyword =~ tr/A-Z/a-z/;
-		SWITCH: {
-			if ($keyword eq "wp-site") {
-				$wpSite = $value;
-				last SWITCH;
-			}
-			if ($keyword eq "wp-user") {
-				$wpUser = $value;
-				last SWITCH;
-			}
-			if ($keyword eq "wp-pass") {
-				$wpPass = $value;
-				last SWITCH;
-			}
-			if ($keyword eq "wp-category") {
-				$wpCategory = $value;
-				last SWITCH;
-			}
-		}
-	}
-	close(WPCONFIG_FD);
 	return(1);
 }
 
@@ -447,6 +549,7 @@ sub loadProxyFromFile {
 #
 sub selectRandomProxy {
 	my $randomIdx = rand($#proxies);
+	($debug) && print STDERR "+++ Using proxy: " . $proxies[$randomIdx] . "\n";
 	return $proxies[$randomIdx];
 }
 
@@ -487,8 +590,9 @@ sub sigHandler {
 
 sub sigReload {
 	syslogOutput("Reloading config files");
-	loadRegexFromFile($configFile);
-	(@proxies) && loadProxyFromFile($proxyConfigFile);
+	parseXMLConfigFile($configFile);
+	loadRegexFromFile($regexFile);
+	(@proxies) && loadProxyFromFile($proxyFile);
 	return;
 }
 
@@ -551,14 +655,15 @@ sub getRegexDesc {
 	return unless defined($regex);
 	my $pos;
 	for our $pos (0 .. $#regexList) {
-		if ($regexList[$pos] eq $regex) {
+		my ($preRegex, $postRegex) = split(/_EXCLUDE_|_INCLUDE_/, $regexList[$pos]);
+		$preRegex = trim($preRegex);
+		if ($preRegex eq $regex) {
 			return($regexDesc[$pos]);
 		}
 	}
 	return;
 }
 
-#
 #
 # Create a Wordpress blog post
 #
@@ -598,6 +703,52 @@ sub createBlogPost {
 	};
 	my $ID = $o->newPost($hashref, 1);
 	return;
+}
+
+#
+# Perl trim function to remove whitespace from the start and end of the string
+#
+sub trim($) {
+	my $string = shift;
+	$string =~ s/^\s+//;
+	$string =~ s/\s+$//;
+	return $string;
+}
+
+#
+# Compare a pastie to the already loaded ones using the Jaro Winkler algorithm
+# See http://en.wikipedia.org/wiki/Jaro%E2%80%93Winkler_distance
+#
+sub FuzzyMatch {
+	my $newContent = shift;
+	my $timeIn = time();
+
+	# Is this feature enabled?
+	(!$distanceMin) && return 0;
+
+	# A dump directory must be configured!
+	(!$newContent || !$dumpDir) && return 0;
+
+	# Ignore content if size above configured limit (performance)
+	(length($newContent) > $distanceMaxSize) && return 0;
+
+	foreach my $pastie (@seenPasties) {
+		open(FD, "$dumpDir/$pastie.raw") || die "Cannot read dumped pastie $pastie: $!";
+		my $buffer = do { local $/; <FD> };
+		close(FD);
+		# Remove the 2 first lines
+ 		$buffer =~ /^Matched: .*\n\n(.*)/s;
+		$buffer = $1;
+		my $distance = strcmp95($newContent, $buffer, length($newContent), TOUPPER => 1, HIGH_PROB => 0);
+		if ($distance > $distanceMin) {
+			syslogOutput("Potential duplicate content found with pastie $pastie (distance: $distance)");
+			return 1;
+		}
+	}
+	my $timeOut = time();
+	$timeOut -= $timeIn;
+	($debug) && print STDERR "+++ Time: " . $timeOut . "\n";
+	return 0;
 }
 
 # Eof

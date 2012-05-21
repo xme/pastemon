@@ -6,10 +6,13 @@ brucon
 -- phpMyAdmin SQL Dump
 -- MySQL dump
 -----BEGIN CERTIFICATE-----
+# Example of exclusion: search for "belgium" without "france" in the same pastie
 belgium _EXCLUDE_ france
-#lulzsec
-#antisec
-#anonymous
+# Example fo inclusion: search for belgium" and "luxembourg" in the same pastie
+belgium _INCLUDE_ luxembourg
+lulzsec
+antisec
+anonymous
 INSERT INTO
 CREATE TABLE
 DROP TABLE

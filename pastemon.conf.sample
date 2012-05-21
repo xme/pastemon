@@ -1,15 +1,48 @@
-rootshell\.be
-anonbelgium
-brucon
------BEGIN RSA PRIVATE KEY-----
------BEGIN DSA PRIVATE KEY-----
--- phpMyAdmin SQL Dump
--- MySQL dump
------BEGIN CERTIFICATE-----
-belgium _EXCLUDE_ france
-#lulzsec
-#antisec
-#anonymous
-INSERT INTO
-CREATE TABLE
-DROP TABLE
+<!--
+  pastemon.pl main configuration file sample
+
+  Note: to disable a feature, comment it using "<!--" and "//-->"
+//-->
+<pastemon>
+        <!-- Core features //-->
+        <core>
+                <ignore-case>yes</ignore-case>
+                <pid-file>/var/run/pastemon.pid</pid-file>
+                <regex-file>regex.conf</regex-file>
+                <sample-size>256</sample-size>
+                <proxy-config>proxies.conf</proxy-config>
+                <dump-directory>/home/pastemon/dump</dump-directory>
+		<http-timeout>15</http-timeout>
+		<!-- Use Jaro-Winkler distance algorithm //-->
+		<distance-min>0.95</distance-min>
+		<distance-max-size>10240</distance-max-size>
+        </core>
+
+        <!-- CEF Output (ArcSight) //-->
+        <cef-output>
+                <destination>10.0.0.1</destination>
+                <port>514</port>
+                <severity>3</severity>
+        </cef-output>
+
+        <!-- Syslog Output //-->
+        <syslog-output>
+                <facility>daemon</facility>
+        </syslog-output>
+
+        <!-- Email Output //-->
+        <smtp-output>
+                <smtp-server>127.0.0.1</smtp-server>
+                <from>pastemon@rootshell.be</from>
+                <recipient>recipient@domain.com</recipient>
+                <subject>PasteMon Alert</subject>
+        </smtp-output>
+
+        <!-- Wordpress Output (XMLRPC) //-->
+        <wordpress-output>
+                <site>www.myblog.com</site>
+                <user>editor</user>
+                <password>averystrongpassword</password>
+                <category>favorite</category>
+        </wordpress-output>
+</pastemon>

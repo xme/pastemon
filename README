@@ -48,3 +48,13 @@ v1.6 - 2012/02/21
 - Added support for Wordpress XMLRPC 
 - Added support for random proxies
 - Some bug fixes
+
+v1.7 - 2012/05/11
+-----------------
+- Added support for "included" regular expressions
+- Fixed in bug in getRegexDesc()
+- Added support for comments ('#') in the regex configuration file
+- Moved configuration parameters from command line switches to an XML file
+- Added matching regex description in dump files 
+- Added SMTP notifications
+- Added distance check to detect duplicate pasties (using Jaro-Winkler algorithm)
