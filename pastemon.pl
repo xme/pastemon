@@ -38,27 +38,12 @@
 #
 # History
 # -------
-# 2012/01/17	Firt version released
-# 2012/01/20	Added '--dump' configuration switch
-# 2012/01/21	Fixed a bug with case sensitivity search
-# 2012/01/23	Added support for "excluded" regular expressions
-# 2012/01/26	Added '--pidfile' configuration switch
-#		Added '--sample' configuration switch
-# 2012/01/30	Bug fix with CEF events (index starting at 0)
-# 2012/02/15	Added notification of proxy usage
-# 2012/02/19	Adapted regex to mach pasties in the new site layout
-# 2012/02/21	Added detection of pastebin "slow down" message
-# 2012/03/09	Added support for Wordpress XMLRPC and support for proxy randomization
-# 2012/04/08	Added support for "included" regular expressions
-# 2012/04/13	Fixed in bug in getRegexDesc()
-# 2012/04/20	Added support for comments ('#') in the regex configuration file
-# 2012/05/11	Moved configuration parameters from command line switches to an XML file
-#		Added matching regex in dump files
-#		Added SMTP notifications
-# 2012/05/15	Added distance check to detect duplicate pasties (using Jaro-Winkler algorithm)
-#
+# See README file
 
 use strict;
+use threads;
+use threads::shared;
+use File::Path; 
 use Getopt::Long;
 use IO::Socket;
 use LWP::UserAgent;
@@ -72,8 +57,11 @@ use Net::SMTP;
 use POSIX qw(setsid);
 use Text::JaroWinkler qw(strcmp95);
 
+use constant PASTEBIN 	=> 0;	# Supported websites
+use constant PASTIE 	=> 1;
+
 my $program = "pastemon.pl";
-my $version = "v1.7";
+my $version = "v1.8";
 my $debug;
 my $help;
 my $ignoreCase;		# By default respect case in strings search
@@ -107,15 +95,14 @@ my $smtpSubject;
 my $distanceMin;
 my $distanceMaxSize;
 
+my $checkPastebin;	# Websites to monitor
+my $checkPastie;
+
 my $syslogFacility = "daemon";
 my $dumpDir;
+my $dumpAll;
 my $sampleSize;
 my %matches;
-
-$SIG{'TERM'}	= \&sigHandler;
-$SIG{'INT'}	= \&sigHandler;
-$SIG{'KILL'}	= \&sigHandler;
-$SIG{'USR1'}	= \&sigReload;
 
 # Process arguments
 my $result = GetOptions(
@@ -175,143 +162,200 @@ if ($ENV{'HTTP_PROXY'}) {
 	syslogOutput("Using detected HTTP proxy: " . $ENV{'HTTP_PROXY'});
 }
 
+my @threads;
+my @webSites;
+($checkPastebin) && push(@webSites, PASTEBIN);
+($checkPastie) && push(@webSites, PASTIE);
+
+# Launch threads based on the number of webistes to monitor
+for my $webSite (@webSites) {
+	my $t = threads->new(\&mainLoop, $webSite);
+	push(@threads, $t);
+}
+
+$SIG{'TERM'}	= \&sigHandler;
+$SIG{'INT'}	= \&sigHandler;
+$SIG{'KILL'}	= \&sigHandler;
+$SIG{'USR1'}	= sub {
+			foreach my $t (@threads) {
+				$t->kill('SIGUSR1');
+			}
+		      };
+
+# Parent process just waiting for a signal
+while(1) {
+	sleep(1);
+	if ($caught) {
+		syslogOutput("Killing my threads");
+		foreach my $t (@threads) {
+			$t->kill('SIGKILL');
+		}
+	}
+}
+
+exit 0;
+
 # ---------
 # Main loop
 # ---------
-
-while(1) {
-	my $pastie;
-	my $regex;
-	if (!&fetchLastPasties) {
-		foreach $pastie (@pasties) {
-			exit 0 if ($caught == 1);
-			if (!grep /$pastie/, @seenPasties) {
-				my $content = fetchPastie($pastie);
-				if ($content) {
-					# If we receive a "slow down" message, follow Pastin recommandation!
-					if ($content =~ /Please slow down/) {
-						($debug) &&  print STDERR "+++ Slow down message received. Paused 5 seconds\n";
-						sleep(5);
-					}
-					else {
-						undef(%matches);	# Reset the matches regex/counters
-						my $i = 0;
-						foreach $regex (@regexList) {
-							# Search for an exception regex
-							my ($preRegex, $postRegex) = split(/_EXCLUDE_|_INCLUDE_/, $regex);
-							$preRegex = trim($preRegex);	# Remove leading/trailing spaces
-							$postRegex = trim($postRegex);
-							my $sampleData;
-							my ($startPos, $endPos);
-							my $preCount = 0;
-							if ($ignoreCase) {
-								$preCount += () = $content =~ /$preRegex/gi;
-								$startPos = $-[0];
-								$endPos = $+[0];
-							}
-							else {
-								$preCount += () = $content =~ /$preRegex/g;
-								$startPos = $-[0];
-								$endPos = $+[0];
-							}
-							if ($preCount > 0) {
-								if ($sampleSize) {
-									# Optional: extract a sample of the data
-									$startPos = (($startPos - $sampleSize) < 0) ? 0 : ($startPos - $sampleSize);
-									$sampleData = encode('UTF8', substr($content, $startPos, ($endPos - $startPos) + $sampleSize));
-								}
-								# If exception defined, search for NON matches
-								if ($postRegex) {
-									my $postCount = 0;
-									if ($ignoreCase) {
-										$postCount += () = $content =~ /$postRegex/gi;
-									}
-									else {
-										$postCount += () = $content =~ /$postRegex/g;
-									}
-									if ((! $postCount && $regex =~ /_EXCLUDE_/) ||
-									    (  $postCount && $regex =~ /_INCLUDE_/)) {
-										# No match for $postRegex with _EXCLUDE_ keyword or
-										# Matches for $postRegex with _INCLUDE_ keyword
-										$matches{$i} = [ ( $preRegex, $preCount, $sampleData ) ];
-										$i++;
-									}
-								}
-								else {
-									$matches{$i} = [ ( $preRegex, $preCount, $sampleData ) ];
-									$i++;
-								}
-							}
-						}
-						if ($i) {
-							# Try to find a corresponding pastie?
-							if (!FuzzyMatch($content))
-							{
-								# Generate the results based on matches
-								my $buffer = "Found in http://pastebin.com/raw.php?i=" . $pastie . " : ";
-								my $key;
-								for $key (keys %matches) {
-									$buffer = $buffer . $matches{$key}[0] . " (" . $matches{$key}[1] . " times) ";
-								}
-								if ($sampleSize) {
-									# Optional: Add sample of data
-									my $safeData = $matches{0}[2];
-									# Sanitize the data
-									$safeData =~ s///g;
-									$safeData =~ s/\n/\\n/g;
-									$safeData =~ s/\t/\\t/g;
-									$buffer = $buffer . "| Sample: " . $safeData;
-								}
-								syslogOutput($buffer);
-
-								# Generating CEF event (if configured)
-								($cefDestination) && sendCEFEvent($pastie);
-	
-								# Generating blog post (if configured)
-								($wpSite) && createBlogPost($pastie);
-	
-								# Send SMTP notification (if configured)
-								if ($smtpServer) {
-									my $smtp = Net::SMTP->new($smtpServer);
-									$smtp->mail($smtpFrom);
-									$smtp->to($smtpRecipient);
-									$smtp->data();
-									my $smtpBody = "To: $smtpRecipient\nSubject: $smtpSubject\n\n";
-									for $key (keys %matches) {
-										$smtpBody = $smtpBody . "Matched: " . $matches{$key}[0] . " (" . $matches{$key}[1] . " time(s))\n";
-									}
-									$smtpBody = $smtpBody . "\n" . $content;
-									$smtp->datasend($smtpBody);
-									$smtp->dataend();
-									$smtp->quit();
-								}
-
-								# Save pastie content in the dump directory (if configured)
-								if ($dumpDir) {
-									open(DUMP, ">:encoding(UTF-8)", "$dumpDir/$pastie.raw") or die "Cannot write to $dumpDir/$pastie.raw : $!";
-									for $key (keys %matches) {
-										print DUMP "Matched: " . $matches{$key}[0] . " (" . $matches{$key}[1] . " time(s))\n";
-									}
-									print DUMP "\n$content";
-									close(DUMP);
-								}
-
-								push(@seenPasties, $pastie);
-							}
-						}
-						# Wait a random number of seconds to not mess with pastebin.com webmasters
-						sleep(int(rand(5)));
-					}
-				}
+sub mainLoop {
+	$SIG{'USR1'}	= \&sigReload; # Handle config reload
+	$SIG{'KILL'}    = \&sigHandler;
+	my $webSite = shift;
+	while(1) {
+		my $pastie;
+		if (!&fetchLastPasties($webSite)) {
+			foreach $pastie (@pasties) {
+				exit 0 if ($caught == 1);
+				analyzePastie($pastie);
 			}
+			exit 0 if ($caught == 1);
 		}
-		exit 0 if ($caught == 1);
+		purgeOldPasties($maxPasties);
+		# Wait a random number of seconds to not mess with pastebin.com webmasters
+		sleep(int(rand(5)));
 	}
-	purgeOldPasties($maxPasties);
-	# Wait a random number of seconds to not mess with pastebin.com webmasters
-	sleep(int(rand(5)));
 }
 
+#
+# analyzePastie
+#
+sub analyzePastie {
+	my $pastie = shift or return;
+	my $regex;
+	if (!grep /$pastie/, @seenPasties) {
+		my $content = fetchPastie($pastie);
+		if ($content) {
+			# If we receive a "slow down" message, follow Pastin recommandation!
+			if ($content =~ /Please slow down/) {
+				($debug) &&  print STDERR "+++ Slow down message received. Paused 5 seconds\n";
+				sleep(5);
+			}
+			else {
+				undef(%matches);	# Reset the matches regex/counters
+				my $i = 0;
+				foreach $regex (@regexList) {
+					# Search for an exception regex
+					my ($preRegex, $postRegex) = split(/_EXCLUDE_|_INCLUDE_/, $regex);
+					$preRegex = trim($preRegex);	# Remove leading/trailing spaces
+					$postRegex = trim($postRegex);
+					my $sampleData;
+					my ($startPos, $endPos);
+					my $preCount = 0;
+					if ($ignoreCase) {
+						$preCount += () = $content =~ /$preRegex/mgi;
+						$startPos = $-[0];
+						$endPos = $+[0];
+					}
+					else {
+						$preCount += () = $content =~ /$preRegex/mg;
+						$startPos = $-[0];
+						$endPos = $+[0];
+					}
+					if ($preCount > 0) {
+						if ($sampleSize) {
+							# Optional: extract a sample of the data
+							$startPos = (($startPos - $sampleSize) < 0) ? 0 : ($startPos - $sampleSize);
+							$sampleData = encode('UTF8', substr($content, $startPos, ($endPos - $startPos) + $sampleSize));
+						}
+						# If exception defined, search for NON matches
+						if ($postRegex) {
+							my $postCount = 0;
+							if ($ignoreCase) {
+								$postCount += () = $content =~ /$postRegex/mgi;
+							}
+							else {
+								$postCount += () = $content =~ /$postRegex/mg;
+							}
+							if ((! $postCount && $regex =~ /_EXCLUDE_/) ||
+							    (  $postCount && $regex =~ /_INCLUDE_/)) {
+								# No match for $postRegex with _EXCLUDE_ keyword or
+								# Matches for $postRegex with _INCLUDE_ keyword
+								$matches{$i} = [ ( $preRegex, $preCount, $sampleData ) ];
+								$i++;
+							}
+						}
+						else {
+							$matches{$i} = [ ( $preRegex, $preCount, $sampleData ) ];
+							$i++;
+						}
+					}
+				}
+				if ($i) {
+					# Try to find a corresponding pastie?
+					if (!FuzzyMatch($content))
+					{
+						# Generate the results based on matches
+						my $buffer = "Found in " . $pastie . " : ";
+						my $key;
+						for $key (keys %matches) {
+							$buffer = $buffer . $matches{$key}[0] . " (" . $matches{$key}[1] . " times) ";
+						}
+						if ($sampleSize) {
+							# Optional: Add sample of data
+							my $safeData = $matches{0}[2];
+							# Sanitize the data
+							$safeData =~ s///g;
+							$safeData =~ s/\n/\\n/g;
+							$safeData =~ s/\t/\\t/g;
+							$buffer = $buffer . "| Sample: " . $safeData;
+						}
+						syslogOutput($buffer);
+
+						# Generating CEF event (if configured)
+						($cefDestination) && sendCEFEvent($pastie);
+	
+						# Generating blog post (if configured)
+						($wpSite) && createBlogPost($pastie);
+
+						# Send SMTP notification (if configured)
+						if ($smtpServer) {
+							my $smtp = Net::SMTP->new($smtpServer) or die "Cannot create SMTP connection to $smtpServer: $?";
+							$smtp->mail($smtpFrom);
+							$smtp->to($smtpRecipient);
+							$smtp->data();
+							my $smtpBody = "To: $smtpRecipient\nSubject: $smtpSubject\n\n";
+							for $key (keys %matches) {
+								$smtpBody = $smtpBody . "Matched: " . $matches{$key}[0] . " (" . $matches{$key}[1] . " time(s))\n";
+							}
+							$smtpBody = $smtpBody . "\n" . $content;
+							$smtp->datasend($smtpBody);
+							$smtp->dataend();
+							$smtp->quit();
+						}
+
+						# Save pastie content in the dump directory (if configured)
+						if ($dumpDir) {
+							my $tempPastie = getPastieID($pastie);
+							my $tempDir = validateDumpDir($dumpDir); # Generate and create dump directory
+							(-d $tempDir) or die "Cannot validate directory $dumpDir: $!";
+							open(DUMP, ">:encoding(UTF-8)", "$tempDir/$tempPastie.raw") or die "Cannot write to $tempDir/$tempPastie.raw : $!";
+							for $key (keys %matches) {
+								print DUMP "Matched: " . $matches{$key}[0] . " (" . $matches{$key}[1] . " time(s))\n";
+							}
+							print DUMP "\n$content";
+							close(DUMP);
+						}
+
+						push(@seenPasties, $pastie);
+					}
+				}
+				elsif ($dumpAll && $dumpDir) {
+					# Mirroring mode - dump the pastie in all cases
+					my $tempPastie = getPastieID($pastie);
+					my $tempDir = validateDumpDir($dumpDir);
+					(-d $tempDir) or die "Cannot validate directory $tempDir: $!";
+					open(DUMP, ">:encoding(UTF-8)", "$tempDir/$tempPastie.raw") or die "Cannot write to $tempDir/$tempPastie.raw : $!";
+					print DUMP "\n$content";
+					close(DUMP);
+				}
+
+				# Wait a random number of seconds to not mess with pastebin.com webmasters
+				sleep(int(rand(5)));
+			}
+		}
+	}
+}
 # 
 # Load the configuration from provided XML file
 #
@@ -327,6 +371,7 @@ sub parseXMLConfigFile {
 	undef $pidFile;
 	undef $sampleSize;
 	undef $dumpDir;
+	undef $dumpAll;
 	undef $proxyFile;
 	undef $cefDestination;
 	undef $cefPort;
@@ -341,6 +386,8 @@ sub parseXMLConfigFile {
 	undef $wpCategory;
 	undef $distanceMin;
 	undef $distanceMaxSize;
+	undef $checkPastebin;
+	undef $checkPastie;
 
 	# Core Parameters
 	my $nodes = $xml->find('/pastemon/core');
@@ -350,6 +397,11 @@ sub parseXMLConfigFile {
 			$ignoreCase++;
 			($debug) && print STDERR "+++ Non-sensitive search enabled.\n";
 		}
+		$buff			= $node->find('dump-all')->string_value;
+		if (lc($buff) eq "yes" || $buff eq "1") {
+			$dumpAll++;
+			($debug) && print STDERR "+++ Dumping all pastie (mirror mode).\n";
+		}
 		$pidFile		= $node->find('pid-file')->string_value;
 		$regexFile		= $node->find('regex-file')->string_value;
 		$sampleSize		= $node->find('sample-size')->string_value;
@@ -358,6 +410,21 @@ sub parseXMLConfigFile {
 		$httpTimeout		= $node->find('http-timeout')->string_value;
 		$distanceMin		= $node->find('distance-min')->string_value;
 		$distanceMaxSize	= $node->find('distance-max-size')->string_value;
+	}
+
+	# Monitored websites
+	my $nodes = $xml->find('/pastemon/websites');
+	foreach my $node ($nodes->get_nodelist) {
+		$buff			= $node->find('pastebin')->string_value;
+		if (lc($buff) eq "yes" || $buff eq "1") {
+			$checkPastebin++;
+			($debug) && print STDERR "+++ Pastebin.com monitoring activated.\n";
+		}
+		$buff                   = $node->find('pastie')->string_value;
+		if (lc($buff) eq "yes" || $buff eq "1") {
+			$checkPastie++;
+			($debug) && print STDERR "+++ Pastie.com monitoring activated.\n";
+		}
 	}
 
 	# CEF Parameters
@@ -398,8 +465,13 @@ sub parseXMLConfigFile {
 
 	# Check if the provided dump directory is writable to us
 	if ($dumpDir) {
-		(-w $dumpDir) or die "Directory $dumpDir is not writable: $!";
+		# (-w $dumpDir) or die "Directory $dumpDir is not writable: $!";
 		syslogOutput("Using $dumpDir as dump directory");
+	}
+
+	# Dumping all pasties requires a dump directory
+	if ($dumpAll && !$dumpDir) {
+		syslogOutput("No dump directory specified");
 	}
 
 	# Verifiy sampleSize format if specified
@@ -424,6 +496,8 @@ sub parseXMLConfigFile {
 	# Verify SMTP config
 	if ($smtpServer) {
 		(!$smtpServer || !$smtpFrom || !$smtpRecipient || !$smtpSubject) && die "Incomplete SMTP configuration";
+		my $smtp = Net::SMTP->new($smtpServer) or die "Cannot use SMTP server $smtpServer: $?";
+		$smtp->quit();
 		syslogOutput("Sending SMTP notifications to <".$smtpRecipient.">");
 	}
 
@@ -453,6 +527,7 @@ sub parseXMLConfigFile {
 # (http://pastebin.com/archive)
 #
 sub fetchLastPasties {
+	my $webSite = shift;
 	my $tempProxy;
 	my $ua = LWP::UserAgent->new;
 	$ua->timeout($httpTimeout);
@@ -464,18 +539,58 @@ sub fetchLastPasties {
 		($ENV{'HTTP_PROXY'}) && $ua->env_proxy;
 	}
 	$ua->agent("Mozilla/4.0 (compatible; MSIE 8.0; Windows NT 5.1");
-	my $response = $ua->get("http://pastebin.com/archive");
-	if ($response->is_success) {
-		# Load the pasties into an array
-		# @pasties = $response->decoded_content =~ /<td class=\"icon\"><a href=\"\/(\w+)\">.+<\/a><\/td>/g;
-		# New format (2012/02/19):
-		@pasties = $response->decoded_content =~ /<a href=\"\/(\w{8})\">.+<\/a><\/td>/g;
-		return(0);
+
+	undef @pasties;	# Reset the array first!
+
+	# www.pastebin.com
+	if ($webSite == PASTEBIN) {
+		($debug) && print STDERR "Loading new pasties from pastebin.com.\n";
+		my $response = $ua->get("http://pastebin.com/archive");
+		if ($response->is_success) {
+			# Load the pasties into an array
+			# @pasties = $response->decoded_content =~ /<td class=\"icon\"><a href=\"\/(\w+)\">.+<\/a><\/td>/g;
+			# New format (2012/02/19):
+			my @tempPasties = $response->decoded_content =~ /<a href=\"\/(\w{8})\">.+<\/a><\/td>/g;
+			# Append the complete URL
+			foreach my $p (@tempPasties) {
+				$p = 'http://pastebin.com/raw.php?i=' . $p;
+			}
+			push(@pasties, @tempPasties);
+		}
+		else {
+			syslogOutput("Cannot fetch www.pastebin.com: " . $response->status_line);
+			# If cannot fetch pastie and we use proxies, disable the current one!
+			(@proxies) && disableProxy($tempProxy);
+			return 1;
+		}
 	}
-	syslogOutput("Cannot fetch pasties: " . $response->status_line);
-	# If cannot fetch pastie and we use proxies, disable the current one!
-	(@proxies) && disableProxy($tempProxy);
-	return 1;
+	elsif ($webSite == PASTIE) {
+		($debug) && print STDERR "Loading new pasties from pastie.org.\n";
+		my $response = $ua->get("http://pastie.org/pastes");
+		if ($response->is_success) {
+			my @tempPasties = $response->decoded_content =~ /<a href=\"(http:\/\/pastie.org\/pastes\/\d{7})\">/g;
+			# Append the complete URL
+			foreach my $p (@tempPasties) {
+				$p = $p . '/download';
+			}
+			push(@pasties, @tempPasties);
+		}
+		else {
+			syslogOutput("Cannot fetch www.pastie.org: " . $response->status_line);
+			# If cannot fetch pastie and we use proxies, disable the current one!
+			(@proxies) && disableProxy($tempProxy);
+			return 1;
+		}
+	}
+ 	else {
+		die "Unknown website constant: $webSite";
+	}
+
+	# DEBUG
+	#foreach my $p (@pasties) {
+	#	print "DEBUG: $p\n";
+	#}
+	return 0;
 }
 
 #
@@ -494,7 +609,7 @@ sub fetchPastie {
 		($ENV{'HTTP_PROXY'}) && $ua->env_proxy;
 	}
 	$ua->agent("Mozilla/4.0 (compatible; MSIE 8.0; Windows NT 5.1");
-	my $response = $ua->get("http://pastebin.com/raw.php?i=" . $pastie);
+	my $response = $ua->get("$pastie");
 	if ($response->is_success) {
 		return $response->decoded_content;
 	}
@@ -588,8 +703,11 @@ sub sigHandler {
 	$caught = 1;
 }
 
+#
+# Reload configuration files
+#
 sub sigReload {
-	syslogOutput("Reloading config files");
+	syslogOutput("Reloading config files (Thread ID " . threads->tid() . ")");
 	parseXMLConfigFile($configFile);
 	loadRegexFromFile($regexFile);
 	(@proxies) && loadProxyFromFile($proxyFile);
@@ -620,7 +738,7 @@ sub sendCEFEvent {
 	my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
 	my @months = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec");
 	my $timeStamp = sprintf("%3s %2d %02d:%02d:%02d", $months[$mon], $mday, $hour, $min, $sec);
-	my $buffer = sprintf("<%d>%s CEF:0|%s|%s|%s|regex-match|One or more regex matched|%d|request=http://pastebin.com/raw.php?i=%s destinationDnsDomain=pastebin.com msg=Interesting data has been found on pastebin.com. ", 
+	my $buffer = sprintf("<%d>%s CEF:0|%s|%s|%s|regex-match|One or more regex matched|%d|request=%s destinationDnsDomain=pastebin.com msg=Interesting data has been found on pastebin.com. ", 
 			29,
 			$timeStamp,
 			"blog.rootshell.be",
@@ -673,7 +791,16 @@ sub createBlogPost {
 	my $key;
 	my $title;
 	my $buffer;
-	my $tags = 'pastebin,';
+	my $tags = "";
+
+	# Generate tag based on the URL
+	if ($pastie =~ /pastebin\.com/) {
+		$tags = 'pastebin.com,';
+	}
+	elsif ($pastie =~ /pastie\.org/) {
+		$tags = 'pastie.org,';
+	}
+
 	for $key (keys %matches) {
 		if (!$title) {
 			$title = 'Potential leak of data: ' . getRegexDesc($matches{$key}[0]);
@@ -683,14 +810,14 @@ sub createBlogPost {
 		# Populate Wordpress tags
 		$tags = $tags . getRegexDesc($matches{$key}[0]) . ',';
 	}
-	$buffer = $buffer . 'Source: <a href="http://pastebin.com/raw.php?i=' . $pastie . '">pastebin.com/raw.php?i=' . $pastie . '</a><br>';
+	$buffer = $buffer . 'Source: <a href="' . $pastie . '">' . $pastie . '</a><br>';
 	# Prepare the XML request
 	my $o = WordPress::XMLRPC->new;
 	$o->username($wpUser);
 	$o->password($wpPass);
 	$o->proxy('http://' . $wpSite . '/xmlrpc.php');
 	if (!$o->server()) {
-		syslogOutput("Cannot create the Wordpress blog post");
+		syslogOutput("Cannot connect to the Wordpress blog");
 		return;
 	}
 
@@ -701,7 +828,15 @@ sub createBlogPost {
 		'mt_keywords'		=> $tags,
 		'mt_allow_comments'	=> 0,
 	};
-	my $ID = $o->newPost($hashref, 1);
+	# WordPress::XMLRPC does not handle exceptions properly.
+	# Eval will catch runtime errors or die() and report the
+	# error properly (into $@)
+	my $ret = eval {
+		my $ID = $o->newPost($hashref, 1);
+	};
+	if (!$ret) {
+		syslogOutput("Cannot post Wordpress article: $@");
+	}
 	return;
 }
 
@@ -733,22 +868,75 @@ sub FuzzyMatch {
 	(length($newContent) > $distanceMaxSize) && return 0;
 
 	foreach my $pastie (@seenPasties) {
-		open(FD, "$dumpDir/$pastie.raw") || die "Cannot read dumped pastie $pastie: $!";
-		my $buffer = do { local $/; <FD> };
-		close(FD);
-		# Remove the 2 first lines
- 		$buffer =~ /^Matched: .*\n\n(.*)/s;
-		$buffer = $1;
-		my $distance = strcmp95($newContent, $buffer, length($newContent), TOUPPER => 1, HIGH_PROB => 0);
-		if ($distance > $distanceMin) {
-			syslogOutput("Potential duplicate content found with pastie $pastie (distance: $distance)");
-			return 1;
+		my $tempPastie = getPastieID($pastie);
+		my $tempDir = validateDumpDir($dumpDir);
+		if (open(FD, "$tempDir/$tempPastie.raw")) {
+			my $buffer = do { local $/; <FD> };
+			close(FD);
+			# Remove the 2 first lines
+ 			$buffer =~ /^Matched: .*\n\n(.*)/s;
+			$buffer = $1;
+			my $distance = strcmp95($newContent, $buffer, length($newContent), TOUPPER => 1, HIGH_PROB => 0);
+			print "DEBUG: $distance\n";
+			if ($distance > $distanceMin) {
+				syslogOutput("Potential duplicate content found with pastie $pastie (distance: $distance)");
+				return 1;
+			}
 		}
 	}
 	my $timeOut = time();
 	$timeOut -= $timeIn;
 	($debug) && print STDERR "+++ Time: " . $timeOut . "\n";
 	return 0;
+}
+
+#
+# Build the dump directory based on macro and create it
+#
+sub validateDumpDir {
+	my $dir = shift;
+	(!$dir) && return "";
+
+	# Replace macro-% by correct values. Supported:
+	# %Y : Year
+	# %M : Month
+	# %D : Day
+	# %H : Hour
+	my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
+	$year+=1900;
+	$mon  = sprintf("%02d", ++$mon);
+	$mday = sprintf("%02d", $mday);
+	$hour = sprintf("%02d", $hour);
+	$dir =~ s/\%Y/$year/g;
+	$dir =~ s/\%M/$mon/g;
+	$dir =~ s/\%D/$mday/g;
+	$dir =~ s/\%H/$hour/g;
+	if (!(-d $dir)) {
+		if (!mkpath("$dir")) {
+			# If mkpath() failed, re-check the directory
+			# (Could have been created by another threat!
+			(-d $dir) && return $dir;
+			syslogOutput("mkdir(\"$dir\") failed: $!");
+			return "";
+		}
+	}
+	return $dir;
+}
+
+# 
+# Extract the pastie from an URL:
+# pastebin.com: pastebin.com/raw.php?i=(XXX)
+# pastie.org: pastie.org/pastes/(XXX)/download
+#
+sub getPastieID {
+	my $pastie = shift or return "";
+	if ($pastie =~ /pastebin\.com\/raw\.php\?i=(\w+)/) {
+		return $1;
+	}
+	if ($pastie =~ /pastie\.org\/pastes\/(\d+)\/download/) {
+		return $1;
+	}
+	return "";
 }
 
 # Eof

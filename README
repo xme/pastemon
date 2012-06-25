@@ -9,45 +9,25 @@ The script can also generate (CEF events).
 More information is available here: 
 http://blog.rootshell.be/2012/01/17/monitoring-pastebin-com-within-your-siem/
 
-v1.0 - 2012/01/18
+v1.8 - 2012/06/25
 -----------------
-Initial release
+- [FEATURE] Adder for pastie.org! 
+- [FEATURE] Added multi-threat support (1 thread per website monitored)
+- [FEATURE] Added substitution macro in the dump directory. Support macros are:
+	%Y - replace with the current year
+	%M - replace with the current month
+	%D - replace with the current day
+  Directory is automatically created.
+  Example: /home/user/pastemon/%Y/%M/%D
 
-v1.1 - 2012/01/20
------------------
-- Added a '--dump' configuration switch to save matching pasties in a directory.
-  This is to keep the pasties posted with an expiration date (example: for later review)
-
-v1.2 - 2012/01/21
------------------
-- Fixed a bug affecting the case sensitivity search
-- New feature: an exception can be associated to a regular expression in the configuration file.
-  The syntax is: "regex1 _EXCLUDE_ regex2". This could prevent some false positive matches.
-
-v1.3 - 2012/01/26
------------------
-- Added a '--pidfile=file' configuration switch to specify an alternative location for the PID file.
-  This allows the script to be executed with a non-root account.
-- Added a '--sample=x' configuration to display a sample a data matching a regular expression. 'x' is 
-  the number of bytes displayed before and after the matching string. This is useful to estimate the
-  value of the pastie.  Example:
-  Found in http://pastebin.com/raw.php?i=Q8pQRHKW : belgium (2 times) | Sample: g(0) ""\n  [32] => string(11) "Belgium(32)"\n  [31] => string(14) "Ne
-  
-v1.4 - 2012/02/15
------------------
-- Fixed a bug with CEF events: custome fields start at 1 not 0! (Thanks to Heiko Hansen for the report)
-- Notify the presence of a proxy variable (HTTP_PROXY) 
-
-v1.5 - 2012/02/19
------------------
-- Fixed the regex to grab pasties from the archive page. (HTML code changed)
-
-v1.6 - 2012/02/21
------------------
-- Added a detection of "slow down" messages returned by Pastebin (add a small pause)
-- Added support for Wordpress XMLRPC 
-- Added support for random proxies
-- Some bug fixes
+- [FEATURE] Added a new configuration directive:
+	<dump-all>yes|1</dump-all>
+  This feature enables a dump of *ALL* pastie wheter they match a regex or not.
+  This is similar to a mirror mode
+  WARNING: Huge disk space might be required by this feature!
+- [BUGFIX] Test if the provided SMTP server (for mail notifications) is available
+  (Thanks to @manuelsubredu for the patch)
+- [BUGFIX] Fixed an issue in createBlogPost() which caused an unexpected process exit.
 
 v1.7 - 2012/05/11
 -----------------
@@ -58,3 +38,43 @@ v1.7 - 2012/05/11
 - Added matching regex description in dump files 
 - Added SMTP notifications
 - Added distance check to detect duplicate pasties (using Jaro-Winkler algorithm)
+
+v1.6 - 2012/02/21
+-----------------
+- Added a detection of "slow down" messages returned by Pastebin (add a small pause)
+- Added support for Wordpress XMLRPC 
+- Added support for random proxies
+- Some bug fixes
+
+v1.5 - 2012/02/19
+-----------------
+- Fixed the regex to grab pasties from the archive page. (HTML code changed)
+
+v1.4 - 2012/02/15
+-----------------
+- Fixed a bug with CEF events: custome fields start at 1 not 0! (Thanks to Heiko Hansen for the report)
+- Notify the presence of a proxy variable (HTTP_PROXY) 
+
+v1.3 - 2012/01/26
+-----------------
+- Added a '--pidfile=file' configuration switch to specify an alternative location for the PID file.
+  This allows the script to be executed with a non-root account.
+- Added a '--sample=x' configuration to display a sample a data matching a regular expression. 'x' is 
+  the number of bytes displayed before and after the matching string. This is useful to estimate the
+  value of the pastie.  Example:
+  Found in http://pastebin.com/raw.php?i=Q8pQRHKW : belgium (2 times) | Sample: g(0) ""\n  [32] => string(11) "Belgium(32)"\n  [31] => string(14) "Ne
+
+v1.2 - 2012/01/21
+-----------------
+- Fixed a bug affecting the case sensitivity search
+- New feature: an exception can be associated to a regular expression in the configuration file.
+  The syntax is: "regex1 _EXCLUDE_ regex2". This could prevent some false positive matches.
+
+v1.1 - 2012/01/20
+-----------------
+- Added a '--dump' configuration switch to save matching pasties in a directory.
+  This is to keep the pasties posted with an expiration date (example: for later review)
+
+v1.0 - 2012/01/18
+-----------------
+Initial release

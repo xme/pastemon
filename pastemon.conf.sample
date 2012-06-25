@@ -11,12 +11,20 @@
                 <regex-file>regex.conf</regex-file>
                 <sample-size>256</sample-size>
                 <proxy-config>proxies.conf</proxy-config>
-                <dump-directory>/home/pastemon/dump</dump-directory>
+                <dump-directory>/home/pastemon/dump/%Y/%M/%D</dump-directory>
+                <dump-all>yes</dump-all>
 		<http-timeout>15</http-timeout>
 		<!-- Use Jaro-Winkler distance algorithm //-->
 		<distance-min>0.95</distance-min>
 		<distance-max-size>10240</distance-max-size>
         </core>
+
+        <!-- Websites to monitor //-->
+        <websites>
+                <pastebin>yes</pastebin>
+                <pastie>yes</pastie>
+        </websites>
+
 
         <!-- CEF Output (ArcSight) //-->
         <cef-output>
