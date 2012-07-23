@@ -57,11 +57,12 @@ use Net::SMTP;
 use POSIX qw(setsid);
 use Text::JaroWinkler qw(strcmp95);
 
-use constant PASTEBIN 	=> 0;	# Supported websites
-use constant PASTIE 	=> 1;
+use constant PROCESS_URL	=> 1;
+use constant PASTEBIN 		=> 0;	# Supported websites
+use constant PASTIE 		=> 1;
 
 my $program = "pastemon.pl";
-my $version = "v1.8";
+my $version = "v1.9";
 my $debug;
 my $help;
 my $ignoreCase;		# By default respect case in strings search
@@ -73,8 +74,7 @@ my $httpTimeout = 10;	# Default HTTP timeout
 my @pasties;
 my @seenPasties;
 my $maxPasties = 500;
-my @regexList;
-my @regexDesc;
+my @regexList;		# List of interesting regex (with the data)
 my $pidFile = "/var/run/pastemon.pid";
 my $configFile;		# Main XML configuration file
 my $regexFile;		# Regular expressions definitions
@@ -94,6 +94,9 @@ my $smtpSubject;
 
 my $distanceMin;
 my $distanceMaxSize;
+
+my $followUrls;		# Follow URLs found in pastie
+my $followMatching;
 
 my $checkPastebin;	# Websites to monitor
 my $checkPastie;
@@ -207,13 +210,13 @@ sub mainLoop {
 		if (!&fetchLastPasties($webSite)) {
 			foreach $pastie (@pasties) {
 				exit 0 if ($caught == 1);
-				analyzePastie($pastie);
+				analyzePastie($pastie, PROCESS_URL);
 			}
 			exit 0 if ($caught == 1);
 		}
 		purgeOldPasties($maxPasties);
 		# Wait a random number of seconds to not mess with pastebin.com webmasters
-		sleep(int(rand(5)));
+		sleep(int(rand(15)));
 	}
 }
 
@@ -222,6 +225,7 @@ sub mainLoop {
 #
 sub analyzePastie {
 	my $pastie = shift or return;
+	my $processUrl = shift;
 	my $regex;
 	if (!grep /$pastie/, @seenPasties) {
 		my $content = fetchPastie($pastie);
@@ -234,52 +238,71 @@ sub analyzePastie {
 			else {
 				undef(%matches);	# Reset the matches regex/counters
 				my $i = 0;
+				my $regexSearch;
+				my $regexInclude;
+				my $regexExclude;
+				my $regexDesc;
+				my $regexCount;
 				foreach $regex (@regexList) {
-					# Search for an exception regex
-					my ($preRegex, $postRegex) = split(/_EXCLUDE_|_INCLUDE_/, $regex);
-					$preRegex = trim($preRegex);	# Remove leading/trailing spaces
-					$postRegex = trim($postRegex);
+					$regexSearch	= @$regex[0];
+					$regexInclude	= @$regex[1];
+					$regexExclude	= @$regex[2];
+					$regexDesc	= @$regex[3];
+					$regexCount	= @$regex[4];
 					my $sampleData;
 					my ($startPos, $endPos);
 					my $preCount = 0;
 					if ($ignoreCase) {
-						$preCount += () = $content =~ /$preRegex/mgi;
+						$preCount += () = $content =~ /$regexSearch/mgi;
 						$startPos = $-[0];
 						$endPos = $+[0];
 					}
 					else {
-						$preCount += () = $content =~ /$preRegex/mg;
+						$preCount += () = $content =~ /$regexSearch/mg;
 						$startPos = $-[0];
 						$endPos = $+[0];
 					}
-					if ($preCount > 0) {
+					if ($preCount >= $regexCount) {	
 						if ($sampleSize) {
 							# Optional: extract a sample of the data
 							$startPos = (($startPos - $sampleSize) < 0) ? 0 : ($startPos - $sampleSize);
 							$sampleData = encode('UTF8', substr($content, $startPos, ($endPos - $startPos) + $sampleSize));
 						}
-						# If exception defined, search for NON matches
-						if ($postRegex) {
+						# Process "include" regex defined
+						if ($regexInclude ne "") {
 							my $postCount = 0;
 							if ($ignoreCase) {
-								$postCount += () = $content =~ /$postRegex/mgi;
+								$postCount += () = $content =~ /$regexInclude/mgi;
+							} else {
+								$postCount += () = $content =~ /$regexInclude/mg;
 							}
-							else {
-								$postCount += () = $content =~ /$postRegex/mg;
+							if ($postCount) {
+								# Matches for include $regex
+								$matches{$i} = [ ( $regexSearch, $preCount, $sampleData ) ];
+								$i++;
 							}
-							if ((! $postCount && $regex =~ /_EXCLUDE_/) ||
-							    (  $postCount && $regex =~ /_INCLUDE_/)) {
-								# No match for $postRegex with _EXCLUDE_ keyword or
-								# Matches for $postRegex with _INCLUDE_ keyword
-								$matches{$i} = [ ( $preRegex, $preCount, $sampleData ) ];
+						}
+						elsif ($regexExclude ne "") {
+							my $postCount = 0;
+							if ($ignoreCase) {
+								$postCount += () = $content =~ /$regexExclude/mgi;
+							} else {
+								$postCount += () = $content =~ /$regexExclude/mg;
+							}
+							if (! $postCount) {
+								# Matches for exclude $regex
+								$matches{$i} = [ ( $regexSearch, $preCount, $sampleData ) ];
 								$i++;
 							}
 						}
 						else {
-							$matches{$i} = [ ( $preRegex, $preCount, $sampleData ) ];
+							$matches{$i} = [ ( $regexSearch, $preCount, $sampleData ) ];
 							$i++;
 						}
 					}
+				}
+				if ($followUrls && $processUrl) {
+					$i += processUrls($content);
 				}
 				if ($i) {
 					# Try to find a corresponding pastie?
@@ -337,7 +360,6 @@ sub analyzePastie {
 							close(DUMP);
 						}
 
-						push(@seenPasties, $pastie);
 					}
 				}
 				elsif ($dumpAll && $dumpDir) {
@@ -350,12 +372,36 @@ sub analyzePastie {
 					close(DUMP);
 				}
 
+				# Flag this pastie as "seen"
+				push(@seenPasties, $pastie);
+
 				# Wait a random number of seconds to not mess with pastebin.com webmasters
 				sleep(int(rand(5)));
 			}
 		}
 	}
 }
+
+#
+# Search for interesting data in URLs found inside the pastie
+#
+sub processUrls {
+	my $pastie = shift || return 0;
+	while ($pastie =~ m,(http.*?://([^\s)\"](?!ttp:))+),g) { # "
+		my $url = $&;
+		if ($url =~ /$followMatching/gi) { #Process only URLs matching our regex!
+                	($debug) && print "+++ Following URL: $url\n";
+			my $ua = LWP::UserAgent->new;
+			$ua->agent(getRandomUA());
+			my $r = $ua->head("$url");
+			if ($r->is_success && substr($r->header('Content-Type'), 0, 5) eq "text/") {	# Only process "text"
+				analyzePastie($url);
+			}
+        	}
+	}
+	return 0;
+}
+
 # 
 # Load the configuration from provided XML file
 #
@@ -388,6 +434,8 @@ sub parseXMLConfigFile {
 	undef $distanceMaxSize;
 	undef $checkPastebin;
 	undef $checkPastie;
+	undef $followUrls;
+	undef $followMatching;
 
 	# Core Parameters
 	my $nodes = $xml->find('/pastemon/core');
@@ -425,6 +473,17 @@ sub parseXMLConfigFile {
 			$checkPastie++;
 			($debug) && print STDERR "+++ Pastie.com monitoring activated.\n";
 		}
+	}
+
+	# Follow URLs
+	my $nodes = $xml->find('/pastemon/urls');
+	foreach my $node ($nodes->get_nodelist) {
+		$buff			= $node->find('follow')->string_value;
+		if (lc($buff) eq "yes" || $buff eq "1") {
+			$followUrls++;
+			($debug) && print STDERR "+++ Follow URLs feature activated.\n";
+		}
+		$followMatching		= $node->find('matching')->string_value;
 	}
 
 	# CEF Parameters
@@ -519,6 +578,12 @@ sub parseXMLConfigFile {
 		}
 	}
 
+	# Follow URL
+	if ($followUrls && !$followMatching) {
+		syslogOutput("Warning: No regex defined to match URLs");
+		$followMatching = ".*";	# Match everything
+	}
+
 	return;
 }
 
@@ -538,7 +603,7 @@ sub fetchLastPasties {
 	else {
 		($ENV{'HTTP_PROXY'}) && $ua->env_proxy;
 	}
-	$ua->agent("Mozilla/4.0 (compatible; MSIE 8.0; Windows NT 5.1");
+	$ua->agent(getRandomUA());
 
 	undef @pasties;	# Reset the array first!
 
@@ -608,7 +673,7 @@ sub fetchPastie {
 	else {
 		($ENV{'HTTP_PROXY'}) && $ua->env_proxy;
 	}
-	$ua->agent("Mozilla/4.0 (compatible; MSIE 8.0; Windows NT 5.1");
+	$ua->agent(getRandomUA());
 	my $response = $ua->get("$pastie");
 	if ($response->is_success) {
 		return $response->decoded_content;
@@ -627,16 +692,21 @@ sub loadRegexFromFile {
 	my $file = shift;
 	die "A configuration file is required" unless defined($file);
 	undef @regexList; # Clean up array (if reloaded via SIGUSR1
-	undef @regexDesc;
-	open(REGEX_FD, "$file") || die "Cannot open file $file : $!";
-	while(<REGEX_FD>) {
-		chomp;
-		if (length > 0 && !($_ =~ /^#/)) {
-			# Default format regex<TAB>description
-			my ($regex, $desc) = split(/[\t]+/, $_);
-			push(@regexList, $regex);
-			push(@regexDesc, $desc);
+	( -r "$file") || die "Cannot open file $file: $!";
+	my $xp = XML::XPath->new( filename => "$file");
+	my $ns = $xp->find('/config/regex');
+	foreach my $n ($ns->get_nodelist) {
+		my @r;
+		push(@r,	$n->find('search')->string_value);
+		push(@r,	$n->find('include')->string_value);
+		push(@r,	$n->find('exclude')->string_value);
+		push(@r,	$n->find('description')->string_value);
+		if ($n->find('count')->string_value ne "") {
+			push(@r,$n->find('count')->string_value);
+		} else {
+			push(@r, "1");
 		}
+		push(@regexList, [ @r ]);
 	}
 	syslogOutput("Loaded " . @regexList . " regular expressions from " . $file);
 	return(1);
@@ -771,12 +841,9 @@ sub sendCEFEvent {
 sub getRegexDesc {
 	my $regex = shift;
 	return unless defined($regex);
-	my $pos;
-	for our $pos (0 .. $#regexList) {
-		my ($preRegex, $postRegex) = split(/_EXCLUDE_|_INCLUDE_/, $regexList[$pos]);
-		$preRegex = trim($preRegex);
-		if ($preRegex eq $regex) {
-			return($regexDesc[$pos]);
+	foreach my $r (@regexList) {
+		if ($regex eq @$r[0]) {
+			return(@$r[3]);
 		}
 	}
 	return;
@@ -876,11 +943,12 @@ sub FuzzyMatch {
 			# Remove the 2 first lines
  			$buffer =~ /^Matched: .*\n\n(.*)/s;
 			$buffer = $1;
-			my $distance = strcmp95($newContent, $buffer, length($newContent), TOUPPER => 1, HIGH_PROB => 0);
-			print "DEBUG: $distance\n";
-			if ($distance > $distanceMin) {
-				syslogOutput("Potential duplicate content found with pastie $pastie (distance: $distance)");
-				return 1;
+			if (length($buffer) > 0) { # Bug fix 2012/07/16: Only process "matched" pasties!
+				my $distance = strcmp95($newContent, $buffer, length($newContent), TOUPPER => 1, HIGH_PROB => 0);
+				if ($distance > $distanceMin) {
+					syslogOutput("Potential duplicate content found with pastie $pastie (distance: $distance)");
+					return 1;
+				}
 			}
 		}
 	}
@@ -937,6 +1005,27 @@ sub getPastieID {
 		return $1;
 	}
 	return "";
+}
+
+#
+# Return a random User-Agent
+# (Feel free to add or create yours)
+#
+sub getRandomUA {
+	my @UA = ( 
+		"Mozilla/4.0 (compatible; MSIE 8.0; Windows NT 5.1",
+		"Opera/9.20 (Windows NT 6.0; U; en)",
+		"Googlebot/2.1 ( http://www.googlebot.com/bot.html)",
+		"Mozilla/5.0 (Windows; U; Windows NT 5.1; en-US; rv:1.7.5) Gecko/20060127 Netscape/8.1",
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_7_4) AppleWebKit/536.5 (KHTML, like Gecko) Chrome/19.0.1084.56 Safari/536.5",
+		"Mozilla/5.0 (compatible; MSIE 9.0; Windows NT 6.1; Trident/5.0)",
+		"Mozilla/5.0 (iPhone; CPU iPhone OS 5_1_1 like Mac OS X) AppleWebKit/534.46 (KHTML, like Gecko) Version/5.1 Mobile/9B206 Safari/7534.48.3",
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10.6; rv:12.0) Gecko/20100101 Firefox/12.0",
+		"Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1; SV1; FunWebProducts; .NET CLR 1.1.4322; PeoplePal 6.2)",
+		"Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:12.0) Gecko/20100101 Firefox/12.0"
+	);
+	my $rnd = rand(@UA);
+	return $UA[$rnd];
 }
 
 # Eof
