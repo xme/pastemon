@@ -9,6 +9,32 @@ The script can also generate (CEF events).
 More information is available here: 
 http://blog.rootshell.be/2012/01/17/monitoring-pastebin-com-within-your-siem/
 
+v1.9 - 2012/07/23
+-----------------
+- [FEATURE] pastemon can now follow (search for regex) URLs detected in pasties. This is
+  configured via the main configuration file:
+
+	<urls>
+		<follow>yes</follow>
+		<matching>(bit\.ly)</matching>
+	</urls>
+
+- [FEATURE] The regex.conf format changed to an XML format.
+  Examples:
+	<regex>
+		<search>\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}</search>
+		<count>10</count>
+		<description>IP Address</description>
+	</regex>
+
+- [FEATURE] A minimum number of regex occurences can be defined to notify
+  (<count> tag in the XML file)
+
+- [FEATURE] HTTP requests are now using now a random User-Agent. 
+
+- [BUGFIX] Optimized the detection of already processed pasties. This reduces the amount of HTTP 
+  requests send to the website.
+
 v1.8 - 2012/06/25
 -----------------
 - [FEATURE] Adder for pastie.org! 
