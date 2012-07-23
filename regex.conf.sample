@@ -1,18 +1,39 @@
-rootshell\.be
-anonbelgium
-brucon
------BEGIN RSA PRIVATE KEY-----
------BEGIN DSA PRIVATE KEY-----
--- phpMyAdmin SQL Dump
--- MySQL dump
------BEGIN CERTIFICATE-----
-# Example of exclusion: search for "belgium" without "france" in the same pastie
-belgium _EXCLUDE_ france
-# Example fo inclusion: search for belgium" and "luxembourg" in the same pastie
-belgium _INCLUDE_ luxembourg
-lulzsec
-antisec
-anonymous
-INSERT INTO
-CREATE TABLE
-DROP TABLE
+<!--
+  pastemon.pl regex configuration file (sample)
+//-->
+
+<config>
+        <regex>
+                <search>rootshell\.be</search>
+        </regex>
+        <regex>
+                <search>anonbelgium</search>
+        </regex>
+        <regex>
+                <search>-----BEGIN (RSA|DSA) PRIVATE KEY-----</search>
+        </regex>
+        <regex>
+                <search>-- phpMyAdmin SQL Dump</search>
+        </regex>
+	<!--
+	Example of exclusion: search for "belgium" without "france" in the same pastie
+	//-->
+        <regex>
+                <search>belgium</search>
+		<exclude>france</exclude>
+        </regex>
+	<!--
+	Example fo inclusion: search for belgium" and "luxembourg" in the same pastie
+	//-->
+        <regex>
+                <search>belgium</search>
+		<include>luxembourg</include>
+        </regex>
+	<!--
+	Example of match 5 IP addresses
+	//-->
+	<regex>
+		<search>\d+\.\d+\.\d+\.\d+</search>
+		<count>5</count>
+	</regex>
+</config>
