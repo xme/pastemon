@@ -25,6 +25,11 @@
                 <pastie>yes</pastie>
         </websites>
 
+        <!-- Follow URLs //-->
+        <urls>
+                <follow>yes</follow>
+                <matching>(anonpaste|pastebin\.com|pastie\.org|pastehtml\.com|pastebay\.net|pastee\.org)</matching>
+        </urls>
 
         <!-- CEF Output (ArcSight) //-->
         <cef-output>
