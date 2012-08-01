@@ -50,19 +50,22 @@ use LWP::UserAgent;
 use HTML::Entities;
 use Sys::Syslog;
 use Encode;
-use WordPress::XMLRPC;
 use XML::XPath;
 use XML::XPath::XMLParser;
 use Net::SMTP;
 use POSIX qw(setsid);
-use Text::JaroWinkler qw(strcmp95);
+
+# Optional modules
+my $haveWordPressXMLRMC = eval "use WordPress::XMLRPC; 1";
+my $haveTextJaroWinkler = eval "use Text::JaroWinkler qw(strcmp95); 1";
+my $haveIOCompressGzip	= eval "use IO::Compress::Gzip; 1";
 
 use constant PROCESS_URL	=> 1;
 use constant PASTEBIN 		=> 0;	# Supported websites
 use constant PASTIE 		=> 1;
 
 my $program = "pastemon.pl";
-my $version = "v1.9";
+my $version = "v1.10";
 my $debug;
 my $help;
 my $ignoreCase;		# By default respect case in strings search
@@ -75,8 +78,8 @@ my @pasties;
 my @seenPasties;
 my $maxPasties = 500;
 my @regexList;		# List of interesting regex (with the data)
-my $pidFile = "/var/run/pastemon.pid";
-my $configFile;		# Main XML configuration file
+my $pidFile 	= "/var/run/pastemon.pid";
+my $configFile	= "/etc/pastemon.conf";		# Main XML configuration file
 my $regexFile;		# Regular expressions definitions
 my $wpConfigFile;
 my $proxyFile;
@@ -104,6 +107,7 @@ my $checkPastie;
 my $syslogFacility = "daemon";
 my $dumpDir;
 my $dumpAll;
+my $compressDump;
 my $sampleSize;
 my %matches;
 
@@ -358,6 +362,17 @@ sub analyzePastie {
 							}
 							print DUMP "\n$content";
 							close(DUMP);
+							if ($compressDump) { # Compress pastie
+								my $in  = "$tempDir/$tempPastie.raw";
+								my $out = "$tempDir/$tempPastie.gz";
+								use IO::Compress::Gzip qw(gzip);
+								if (gzip $in => $out) {
+									unlink("$tempDir/$tempPastie.raw");
+								}
+								else {
+									syslogOutput("Cannot compress $tempDir/$tempPastie.raw: $!");
+								}
+							}
 						}
 
 					}
@@ -370,6 +385,17 @@ sub analyzePastie {
 					open(DUMP, ">:encoding(UTF-8)", "$tempDir/$tempPastie.raw") or die "Cannot write to $tempDir/$tempPastie.raw : $!";
 					print DUMP "\n$content";
 					close(DUMP);
+					if ($compressDump) { # Compress pastie
+						my $in  = "$tempDir/$tempPastie.raw";
+						my $out = "$tempDir/$tempPastie.gz";
+						use IO::Compress::Gzip qw(gzip);
+						if (gzip $in => $out) {
+							unlink("$tempDir/$tempPastie.raw");
+						}
+						else { 
+							syslogOutput("Cannot compress $tempDir/$tempPastie.raw: $!");
+						}
+					}
 				}
 
 				# Flag this pastie as "seen"
@@ -418,6 +444,7 @@ sub parseXMLConfigFile {
 	undef $sampleSize;
 	undef $dumpDir;
 	undef $dumpAll;
+	undef $compressDump;
 	undef $proxyFile;
 	undef $cefDestination;
 	undef $cefPort;
@@ -448,7 +475,12 @@ sub parseXMLConfigFile {
 		$buff			= $node->find('dump-all')->string_value;
 		if (lc($buff) eq "yes" || $buff eq "1") {
 			$dumpAll++;
-			($debug) && print STDERR "+++ Dumping all pastie (mirror mode).\n";
+			($debug) && print STDERR "+++ Dumping all pasties (mirror mode).\n";
+		}
+		$buff			= $node->find('compress-pasties')->string_value;
+		if (lc($buff) eq "yes" || $buff eq "1") {
+			$compressDump++;
+			($debug) && print STDERR "+++ Compressing all pasties (mirror mode).\n";
 		}
 		$pidFile		= $node->find('pid-file')->string_value;
 		$regexFile		= $node->find('regex-file')->string_value;
@@ -528,6 +560,20 @@ sub parseXMLConfigFile {
 		syslogOutput("Using $dumpDir as dump directory");
 	}
 
+	# Compress dumped pasties?
+	if ($compressDump) {
+		if ($haveIOCompressGzip) { # Module IO::Compress::Gzip installed?
+			if (!$dumpDir) {
+				syslogOutput("Option compress-pasties disabled: No dump directory defined");
+				undef $compressDump
+			}
+		}
+		else {
+			syslogOutput("Option compress-pasties disabled: IO::Compress:Gzip not installed");
+			undef $compressDump;
+		}
+	}
+
 	# Dumping all pasties requires a dump directory
 	if ($dumpAll && !$dumpDir) {
 		syslogOutput("No dump directory specified");
@@ -547,9 +593,15 @@ sub parseXMLConfigFile {
 
 	# Verify Wordpress config
 	if ($wpSite) {
-		(!$wpSite || !$wpUser || !$wpPass || !$wpCategory) && die "Incomplete Wordpress configuration";
-		($sampleSize) || die "A sample buffer length must be given with Wordpress output";
-		syslogOutput("Dumping data to $wpSite/xmlrpc.php");
+		if ($haveWordPressXMLRMC) { # Module WordPress::XMLRPC installed?
+			(!$wpSite || !$wpUser || !$wpPass || !$wpCategory) && die "Incomplete Wordpress configuration";
+			($sampleSize) || die "A sample buffer length must be given with Wordpress output";
+			syslogOutput("Dumping data to $wpSite/xmlrpc.php");
+		} 
+		else {
+			syslogOutput("Wordpress configuration disabled: Wordpress::XMLRPC not installed");
+			undef $wpSite;
+		}
 	}
 
 	# Verify SMTP config
@@ -568,13 +620,19 @@ sub parseXMLConfigFile {
 
 	# Distance
 	if ($distanceMin) {
-		(!$dumpDir) && die "A dump directory must be configured to use the distance check";
-		($distanceMin > 0 && $distanceMin < 1) or die "Minimum distance must be between 0 and 1";
-		if ($distanceMaxSize) {
-			die "Distance max size must be an integer!" if not $distanceMaxSize =~ /\d+/;
-			syslogOutput("Enabled duplicate detection with distance of $distanceMin (size limit: $distanceMaxSize bytes)");
-		} else {
-		syslogOutput("Enabled duplicate detection with distance of $distanceMin");
+		if ($haveTextJaroWinkler) { # Module Text::JaroWinkler installed?
+			(!$dumpDir) && die "A dump directory must be configured to use the distance check";
+			($distanceMin > 0 && $distanceMin < 1) or die "Minimum distance must be between 0 and 1";
+			if ($distanceMaxSize) {
+				die "Distance max size must be an integer!" if not $distanceMaxSize =~ /\d+/;
+				syslogOutput("Enabled duplicate detection with distance of $distanceMin (size limit: $distanceMaxSize bytes)");
+			} else {
+				syslogOutput("Enabled duplicate detection with distance of $distanceMin");
+			}
+		}
+		else {
+			syslogOutput("Distance configuration disabled: Text::JaroWinkler not installed");
+			undef $distanceMin;
 		}
 	}
 
