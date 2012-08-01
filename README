@@ -38,7 +38,7 @@ v1.9 - 2012/07/23
 v1.8 - 2012/06/25
 -----------------
 - [FEATURE] Adder for pastie.org! 
-- [FEATURE] Added multi-threat support (1 thread per website monitored)
+- [FEATURE] Added multi-thread support (1 thread per website monitored)
 - [FEATURE] Added substitution macro in the dump directory. Support macros are:
 	%Y - replace with the current year
 	%M - replace with the current month
