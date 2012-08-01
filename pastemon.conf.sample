@@ -13,6 +13,7 @@
                 <proxy-config>proxies.conf</proxy-config>
                 <dump-directory>/home/pastemon/dump/%Y/%M/%D</dump-directory>
                 <dump-all>yes</dump-all>
+		<compress-pasties>yes</compress-pasties>
 		<http-timeout>15</http-timeout>
 		<!-- Use Jaro-Winkler distance algorithm //-->
 		<distance-min>0.95</distance-min>
