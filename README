@@ -9,6 +9,22 @@ The script can also generate (CEF events).
 More information is available here: 
 http://blog.rootshell.be/2012/01/17/monitoring-pastebin-com-within-your-siem/
 
+v1.10 - 2012/08/01
+------------------
+- [FEATURE] If not configuration file is specified, pastemon.pl tries to load /etc/pastemon.conf
+  by default.
+
+- [FEATURE] pastemon.pl uses specific Perl modules like WordPress::XMLRPC or Text::JaroWinkler.
+  The script now handles properly environment without those modules. It's not required to comment
+  them in the code. If a module is missing, related configuration is automatically disabled.
+
+- [FEATURE] Added optional compression (via IO::Compress::Gzip) of dumped pasties.
+  In configuration file:
+
+	<core>
+		<compress-pasties>yes</compress-pasties>
+	</core>
+
 v1.9 - 2012/07/23
 -----------------
 - [FEATURE] pastemon can now follow (search for regex) URLs detected in pasties. This is
