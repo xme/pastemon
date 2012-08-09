@@ -1,7 +1,6 @@
 <!--
   pastemon.pl main configuration file sample
-
-  Note: to disable a feature, comment it using "<!--" and "//-->"
+  Note: Features can be disabled by commenting them using standard comment tags.
 //-->
 <pastemon>
         <!-- Core features //-->
