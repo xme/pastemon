@@ -63,9 +63,11 @@ my $haveIOCompressGzip	= eval "use IO::Compress::Gzip; 1";
 use constant PROCESS_URL	=> 1;
 use constant PASTEBIN 		=> 0;	# Supported websites
 use constant PASTIE 		=> 1;
+use constant NOPASTE		=> 2;
+use constant PASTESITE		=> 3;
 
 my $program = "pastemon.pl";
-my $version = "v1.10";
+my $version = "v1.11";
 my $debug;
 my $help;
 my $ignoreCase;		# By default respect case in strings search
@@ -103,6 +105,13 @@ my $followMatching;
 
 my $checkPastebin;	# Websites to monitor
 my $checkPastie;
+my $checkNopaste;
+my $checkPastesite;
+
+my $delayPastebin	= 300;	# Delays between pasties fetches
+my $delayPastie		= 300;
+my $delayNopaste	= 300;
+my $delayPastesite	= 300;
 
 my $syslogFacility = "daemon";
 my $dumpDir;
@@ -173,6 +182,8 @@ my @threads;
 my @webSites;
 ($checkPastebin) && push(@webSites, PASTEBIN);
 ($checkPastie) && push(@webSites, PASTIE);
+($checkNopaste) && push(@webSites, NOPASTE);
+($checkPastesite) && push(@webSites, PASTESITE);
 
 # Launch threads based on the number of webistes to monitor
 for my $webSite (@webSites) {
@@ -219,8 +230,22 @@ sub mainLoop {
 			exit 0 if ($caught == 1);
 		}
 		purgeOldPasties($maxPasties);
-		# Wait a random number of seconds to not mess with pastebin.com webmasters
-		sleep(int(rand(15)));
+
+		# Wait some seconds (depending on the website)
+		DELAY: {
+			$webSite == PASTEBIN	&& do { 
+							($debug) && print STDERR "Sleeping $delayPastebin\n"; 
+							sleep($delayPastebin); last DELAY; };
+			$webSite == PASTIE	&& do {
+							($debug) && print STDERR "Sleeping $delayPastie\n";
+							sleep($delayPastie); last DELAY; };
+			$webSite == NOPASTE	&& do {
+							($debug) && print STDERR "Sleeping $delayNopaste\n";
+							sleep($delayNopaste); last DELAY; };
+			$webSite == PASTESITE	&& do {
+							($debug) && print STDERR "Sleeping $delayPastesite\n";
+							sleep($delayPastesite); last DELAY; };
+		}
 	}
 }
 
@@ -234,7 +259,7 @@ sub analyzePastie {
 	if (!grep /$pastie/, @seenPasties) {
 		my $content = fetchPastie($pastie);
 		if ($content) {
-			# If we receive a "slow down" message, follow Pastin recommandation!
+			# If we receive a "slow down" message, follow Pastebin recommandation!
 			if ($content =~ /Please slow down/) {
 				($debug) &&  print STDERR "+++ Slow down message received. Paused 5 seconds\n";
 				sleep(5);
@@ -461,6 +486,8 @@ sub parseXMLConfigFile {
 	undef $distanceMaxSize;
 	undef $checkPastebin;
 	undef $checkPastie;
+	undef $checkNopaste;
+        undef $checkPastesite;
 	undef $followUrls;
 	undef $followMatching;
 
@@ -498,13 +525,27 @@ sub parseXMLConfigFile {
 		$buff			= $node->find('pastebin')->string_value;
 		if (lc($buff) eq "yes" || $buff eq "1") {
 			$checkPastebin++;
-			($debug) && print STDERR "+++ Pastebin.com monitoring activated.\n";
+			($debug) && print STDERR "+++ pastebin.com monitoring activated.\n";
 		}
 		$buff                   = $node->find('pastie')->string_value;
 		if (lc($buff) eq "yes" || $buff eq "1") {
 			$checkPastie++;
-			($debug) && print STDERR "+++ Pastie.com monitoring activated.\n";
+			($debug) && print STDERR "+++ pastie.com monitoring activated.\n";
 		}
+		$buff                   = $node->find('nopaste')->string_value;
+		if (lc($buff) eq "yes" || $buff eq "1") {
+			$checkNopaste++;
+			($debug) && print STDERR "+++ nopaste.me monitoring activated.\n";
+		}
+		$buff			= $node->find('pastesite')->string_value;
+		if (lc($buff) eq "yes" || $buff eq "1") {
+			$checkPastesite++;
+			($debug) && print STDERR "+++ pastesite.com monitoring activated.\n";
+		}
+		$delayPastebin	= $node->find('pastebin-delay')->string_value;
+		$delayPastie	= $node->find('pastie-delay')->string_value;
+		$delayNopaste	= $node->find('nopaste-delay')->string_value;
+		$delayPastesite	= $node->find('pastesite-delay')->string_value;
 	}
 
 	# Follow URLs
@@ -688,7 +729,7 @@ sub fetchLastPasties {
 		}
 	}
 	elsif ($webSite == PASTIE) {
-		($debug) && print STDERR "Loading new pasties from pastie.org.\n";
+		#($debug) && print STDERR "Loading new pasties from pastie.org.\n";
 		my $response = $ua->get("http://pastie.org/pastes");
 		if ($response->is_success) {
 			my @tempPasties = $response->decoded_content =~ /<a href=\"(http:\/\/pastie.org\/pastes\/\d{7})\">/g;
@@ -700,6 +741,43 @@ sub fetchLastPasties {
 		}
 		else {
 			syslogOutput("Cannot fetch www.pastie.org: " . $response->status_line);
+			# If cannot fetch pastie and we use proxies, disable the current one!
+			(@proxies) && disableProxy($tempProxy);
+			return 1;
+		}
+	}
+	elsif ($webSite == NOPASTE) {
+		#($debug) && print STDERR "Loading new pasties from nopaste.me.\n";
+		my $response = $ua->get("http://nopaste.me/recent");
+		if ($response->is_success) {
+			my @tempPasties = $response->decoded_content =~ /<a href=\"http:\/\/nopaste.me\/paste\/([a-z0-9]+)\">/ig;
+			# Append the complete URL
+			foreach my $p (@tempPasties) {
+				$p = 'http://nopaste.me/raw/' . $p . '.txt';
+			}
+			push(@pasties, @tempPasties);
+		}
+		else {
+			syslogOutput("Cannot fetch nopaste.me: " . $response->status_line);
+			# If cannot fetch pastie and we use proxies, disable the current one!
+			(@proxies) && disableProxy($tempProxy);
+			return 1;
+		}
+	}
+	elsif ($webSite == PASTESITE) {
+		($debug) && print STDERR "Loading new pasties from pastesite.com.\n";
+		my $response = $ua->get("http://pastesite.com/recent");
+		if ($response->is_success) {
+			my @tempPasties = $response->decoded_content =~ /<a href=\"(\d+)\" title=\"View this Paste/ig;
+			# Append the complete URL
+			foreach my $p (@tempPasties) {
+				$p = 'http://pastesite.com/' . $p;
+				($debug) && print STDERR "Found pastesite.com: $p\n";
+			}
+			push(@pasties, @tempPasties);
+		}
+		else {
+			syslogOutput("Cannot fetch pastesite.com: " . $response->status_line);
 			# If cannot fetch pastie and we use proxies, disable the current one!
 			(@proxies) && disableProxy($tempProxy);
 			return 1;
@@ -734,7 +812,17 @@ sub fetchPastie {
 	$ua->agent(getRandomUA());
 	my $response = $ua->get("$pastie");
 	if ($response->is_success) {
-		return $response->decoded_content;
+		# Hack for pastesite.com: Extract data from the <textarea> </textarea>
+		# (To bypass the <continue> button)
+		if ($pastie =~ /http:\/\/pastesite.com/) {
+			if ($response->decoded_content =~ /\<textarea .*\>(.*)\<\/textarea\>/igs) {
+				my $pastesiteContent = $1;
+				return $pastesiteContent;
+			}
+		}
+		else {
+			return $response->decoded_content;
+		}
 	}
 	($debug) &&  print STDERR "+++ Cannot fetch pastie $pastie: " . $response->status_line . "\n";
 
@@ -924,6 +1012,12 @@ sub createBlogPost {
 	}
 	elsif ($pastie =~ /pastie\.org/) {
 		$tags = 'pastie.org,';
+	}
+	elsif ($pastie =~ /nopaste\.me/) {
+		$tags = 'nopaste.me,';
+	}
+	elsif($pastie =~ /pastesite\.com/) {
+		$tags = 'pastesite.com,';
 	}
 
 	for $key (keys %matches) {
