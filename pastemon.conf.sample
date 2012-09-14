@@ -22,7 +22,13 @@
         <!-- Websites to monitor //-->
         <websites>
                 <pastebin>yes</pastebin>
+		<pastebin-delay>10</pastebin-delay>
                 <pastie>yes</pastie>
+		<pastie-delay>120</pastie-delay>
+		<nopaste>yes</nopaste>
+		<nopaste-delay>300</nopaste-delay>
+		<pastesite>yes</pastesite>
+		<pastesite-delay>300</pastesite-delay>
         </websites>
 
         <!-- Follow URLs //-->
