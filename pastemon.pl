@@ -370,7 +370,7 @@ sub analyzePastie {
 							for $key (keys %matches) {
 								$smtpBody = $smtpBody . "Matched: " . $matches{$key}[0] . " (" . $matches{$key}[1] . " time(s))\n";
 							}
-							$smtpBody = $smtpBody . "\n" . $content;
+							$smtpBody = $smtpBody . "\nSource: " . $pastie . "\n\n" . $content;
 							$smtp->datasend($smtpBody);
 							$smtp->dataend();
 							$smtp->quit();
@@ -772,7 +772,6 @@ sub fetchLastPasties {
 			# Append the complete URL
 			foreach my $p (@tempPasties) {
 				$p = 'http://pastesite.com/' . $p;
-				($debug) && print STDERR "Found pastesite.com: $p\n";
 			}
 			push(@pasties, @tempPasties);
 		}
