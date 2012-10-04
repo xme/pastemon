@@ -9,6 +9,14 @@ The script can also generate (CEF events).
 More information is available here: 
 http://blog.rootshell.be/2012/01/17/monitoring-pastebin-com-within-your-siem/
 
+v1.12 - 2012/09/20
+------------------
+- [BUGFIX] Fixed FuzzyMatch() which was broken with gziped pasties.
+- [FEATURE] Email notification: The subject is now appended with the <description> field(s)
+  corresponding to the matched regex(es). This allows a better view of received emails as well
+  as filtering them.
+- [BUGFIX] Fixed FuzzyMatch() to detect properly duplicate pasties (fixed regex).
+
 v1.11 - 2012/09/14
 ------------------
 - [FEATURE] Added support for nopaste.me.
