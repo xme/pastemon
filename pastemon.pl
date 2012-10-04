@@ -56,9 +56,10 @@ use Net::SMTP;
 use POSIX qw(setsid);
 
 # Optional modules
-my $haveWordPressXMLRMC = eval "use WordPress::XMLRPC; 1";
-my $haveTextJaroWinkler = eval "use Text::JaroWinkler qw(strcmp95); 1";
-my $haveIOCompressGzip	= eval "use IO::Compress::Gzip; 1";
+my $haveWordPressXMLRMC 	= eval "use WordPress::XMLRPC; 1";
+my $haveTextJaroWinkler 	= eval "use Text::JaroWinkler qw(strcmp95); 1";
+my $haveIOCompressGzip		= eval "use IO::Compress::Gzip; 1";
+my $haveIOUncompressGunzip	= eval "use IO::Uncompress::Gunzip; 1";
 
 use constant PROCESS_URL	=> 1;
 use constant PASTEBIN 		=> 0;	# Supported websites
@@ -67,7 +68,7 @@ use constant NOPASTE		=> 2;
 use constant PASTESITE		=> 3;
 
 my $program = "pastemon.pl";
-my $version = "v1.11";
+my $version = "v1.12";
 my $debug;
 my $help;
 my $ignoreCase;		# By default respect case in strings search
@@ -366,7 +367,14 @@ sub analyzePastie {
 							$smtp->mail($smtpFrom);
 							$smtp->to($smtpRecipient);
 							$smtp->data();
-							my $smtpBody = "To: $smtpRecipient\nSubject: $smtpSubject\n\n";
+							my $subjectTags;
+							for $key (keys %matches) {
+								my $tempDesc = getRegexDesc($matches{$key}[0]);
+                                                                if (length($tempDesc) > 0) {
+                                                                        $subjectTags = $subjectTags . '(' . getRegexDesc($matches{$key}[0]) . ') ';
+                                                                }
+							}
+							my $smtpBody = "To: $smtpRecipient\nSubject: $smtpSubject $subjectTags\n\n";
 							for $key (keys %matches) {
 								$smtpBody = $smtpBody . "Matched: " . $matches{$key}[0] . " (" . $matches{$key}[1] . " time(s))\n";
 							}
@@ -449,6 +457,8 @@ sub processUrls {
 				analyzePastie($url);
 			}
         	}
+		# Protect us against pastebin.com blacklist?
+		#sleep(int(rand(15)));
 	}
 	return 0;
 }
@@ -607,6 +617,10 @@ sub parseXMLConfigFile {
 			if (!$dumpDir) {
 				syslogOutput("Option compress-pasties disabled: No dump directory defined");
 				undef $compressDump
+			}
+			if (!$haveIOUncompressGunzip) { # Module IO::Compress::Gunzp installed?
+				syslogOutput("Option compress-pasties disabled: IO::Uncompress:Gunzip not installed");
+				undef $compressDump;
 			}
 		}
 		else {
@@ -1088,11 +1102,28 @@ sub FuzzyMatch {
 	foreach my $pastie (@seenPasties) {
 		my $tempPastie = getPastieID($pastie);
 		my $tempDir = validateDumpDir($dumpDir);
-		if (open(FD, "$tempDir/$tempPastie.raw")) {
-			my $buffer = do { local $/; <FD> };
-			close(FD);
+		my $buffer = "";
+		# Do we have compression enabled?
+		if ($compressDump) {
+			# Uncompress in the fly
+			my $in = "$tempDir/$tempPastie.gz";
+			if (-r $in) {
+				use IO::Uncompress::Gunzip qw(gunzip);
+				gunzip $in => \$buffer or die "Cannot uncompress $tempDir/$tempPastie.gz";
+				($debug) && print STDERR "+++ Uncompressed $in : " . length($buffer) . " bytes\n";
+			}
+		}
+		else {
+			# Read the plain text file
+			if (open(FD, "$tempDir/$tempPastie.raw")) {
+				$buffer = do { local $/; <FD> };
+				close(FD);
+			}
+		}
+		if (length($buffer) > 0) {
 			# Remove the 2 first lines
- 			$buffer =~ /^Matched: .*\n\n(.*)/s;
+			# Bug: Remove ALL lines starting with Matched (multiple regex)
+ 			$buffer =~ /^(Matched: .*\n)+\n(.*)/s;
 			$buffer = $1;
 			if (length($buffer) > 0) { # Bug fix 2012/07/16: Only process "matched" pasties!
 				my $distance = strcmp95($newContent, $buffer, length($newContent), TOUPPER => 1, HIGH_PROB => 0);
