@@ -9,6 +9,13 @@ The script can also generate (CEF events).
 More information is available here: 
 http://blog.rootshell.be/2012/01/17/monitoring-pastebin-com-within-your-siem/
 
+v1.13 - 2012/10/24
+------------------
+- [CONTRIBUTION] Added support for multiple SMTP recipients (email addresses separared by commas)
+  Contribution from coreyroach@hotmail.com
+- [CONTRIBUTION] Added a new macro-% to specify the site name in the dump function.
+  '%S' will be replaced by the site name. Example: '%S/%Y/%M' => 'pastebin.com/2012/10'. 
+
 v1.12 - 2012/09/20
 ------------------
 - [BUGFIX] Fixed FuzzyMatch() which was broken with gziped pasties.

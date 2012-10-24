@@ -66,9 +66,15 @@ use constant PASTEBIN 		=> 0;	# Supported websites
 use constant PASTIE 		=> 1;
 use constant NOPASTE		=> 2;
 use constant PASTESITE		=> 3;
+my @webSiteNames = ( 			# Self-defined names for multiple usages
+		"pastebin.com",
+		"pastie.net",
+		"nopaste.me",
+		"pastesite.com",
+	);
 
 my $program = "pastemon.pl";
-my $version = "v1.12";
+my $version = "v1.13";
 my $debug;
 my $help;
 my $ignoreCase;		# By default respect case in strings search
@@ -97,6 +103,7 @@ my $smtpServer;		# SMTP settings
 my $smtpFrom;
 my $smtpRecipient;
 my $smtpSubject;
+my @smtpRecipients;
 
 my $distanceMin;
 my $distanceMaxSize;
@@ -226,7 +233,7 @@ sub mainLoop {
 		if (!&fetchLastPasties($webSite)) {
 			foreach $pastie (@pasties) {
 				exit 0 if ($caught == 1);
-				analyzePastie($pastie, PROCESS_URL);
+				analyzePastie($webSite, $pastie, PROCESS_URL);
 			}
 			exit 0 if ($caught == 1);
 		}
@@ -254,6 +261,7 @@ sub mainLoop {
 # analyzePastie
 #
 sub analyzePastie {
+	my $webSite = shift;
 	my $pastie = shift or return;
 	my $processUrl = shift;
 	my $regex;
@@ -336,7 +344,7 @@ sub analyzePastie {
 				}
 				if ($i) {
 					# Try to find a corresponding pastie?
-					if (!FuzzyMatch($content))
+					if (!FuzzyMatch($webSite, $content))
 					{
 						# Generate the results based on matches
 						my $buffer = "Found in " . $pastie . " : ";
@@ -349,6 +357,7 @@ sub analyzePastie {
 							my $safeData = $matches{0}[2];
 							# Sanitize the data
 							$safeData =~ s///g;
+							$safeData =~ s/\n/\\r/g;
 							$safeData =~ s/\n/\\n/g;
 							$safeData =~ s/\t/\\t/g;
 							$buffer = $buffer . "| Sample: " . $safeData;
@@ -365,7 +374,7 @@ sub analyzePastie {
 						if ($smtpServer) {
 							my $smtp = Net::SMTP->new($smtpServer) or die "Cannot create SMTP connection to $smtpServer: $?";
 							$smtp->mail($smtpFrom);
-							$smtp->to($smtpRecipient);
+							$smtp->recipient(@smtpRecipients, { SkipBad => 1});
 							$smtp->data();
 							my $subjectTags;
 							for $key (keys %matches) {
@@ -387,7 +396,7 @@ sub analyzePastie {
 						# Save pastie content in the dump directory (if configured)
 						if ($dumpDir) {
 							my $tempPastie = getPastieID($pastie);
-							my $tempDir = validateDumpDir($dumpDir); # Generate and create dump directory
+							my $tempDir = validateDumpDir($webSite, $dumpDir); # Generate and create dump directory
 							(-d $tempDir) or die "Cannot validate directory $dumpDir: $!";
 							open(DUMP, ">:encoding(UTF-8)", "$tempDir/$tempPastie.raw") or die "Cannot write to $tempDir/$tempPastie.raw : $!";
 							for $key (keys %matches) {
@@ -413,7 +422,7 @@ sub analyzePastie {
 				elsif ($dumpAll && $dumpDir) {
 					# Mirroring mode - dump the pastie in all cases
 					my $tempPastie = getPastieID($pastie);
-					my $tempDir = validateDumpDir($dumpDir);
+					my $tempDir = validateDumpDir($webSite, $dumpDir);
 					(-d $tempDir) or die "Cannot validate directory $tempDir: $!";
 					open(DUMP, ">:encoding(UTF-8)", "$tempDir/$tempPastie.raw") or die "Cannot write to $tempDir/$tempPastie.raw : $!";
 					print DUMP "\n$content";
@@ -664,6 +673,7 @@ sub parseXMLConfigFile {
 		(!$smtpServer || !$smtpFrom || !$smtpRecipient || !$smtpSubject) && die "Incomplete SMTP configuration";
 		my $smtp = Net::SMTP->new($smtpServer) or die "Cannot use SMTP server $smtpServer: $?";
 		$smtp->quit();
+		@smtpRecipients = split(/[, ]+/, $smtpRecipient);
 		syslogOutput("Sending SMTP notifications to <".$smtpRecipient.">");
 	}
 
@@ -1087,6 +1097,7 @@ sub trim($) {
 # See http://en.wikipedia.org/wiki/Jaro%E2%80%93Winkler_distance
 #
 sub FuzzyMatch {
+	my $webSite = shift;
 	my $newContent = shift;
 	my $timeIn = time();
 
@@ -1101,7 +1112,7 @@ sub FuzzyMatch {
 
 	foreach my $pastie (@seenPasties) {
 		my $tempPastie = getPastieID($pastie);
-		my $tempDir = validateDumpDir($dumpDir);
+		my $tempDir = validateDumpDir($webSite, $dumpDir);
 		my $buffer = "";
 		# Do we have compression enabled?
 		if ($compressDump) {
@@ -1144,6 +1155,7 @@ sub FuzzyMatch {
 # Build the dump directory based on macro and create it
 #
 sub validateDumpDir {
+	my $webSite = shift;
 	my $dir = shift;
 	(!$dir) && return "";
 
@@ -1152,6 +1164,7 @@ sub validateDumpDir {
 	# %M : Month
 	# %D : Day
 	# %H : Hour
+	# %S : Site name
 	my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
 	$year+=1900;
 	$mon  = sprintf("%02d", ++$mon);
@@ -1161,6 +1174,7 @@ sub validateDumpDir {
 	$dir =~ s/\%M/$mon/g;
 	$dir =~ s/\%D/$mday/g;
 	$dir =~ s/\%H/$hour/g;
+	$dir =~ s/\%S/$webSiteNames[$webSite]/g;
 	if (!(-d $dir)) {
 		if (!mkpath("$dir")) {
 			# If mkpath() failed, re-check the directory
