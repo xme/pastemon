@@ -94,6 +94,9 @@ my $wpConfigFile;
 my $proxyFile;
 my @proxies;
 
+my $uaFile;
+my @uas;
+
 my $wpSite;		# Wordpress settings
 my $wpUser;
 my $wpPass;
@@ -161,6 +164,7 @@ if (-r $pidFile) {
 }
 
 loadRegexFromFile($regexFile) || die "Cannot load regex from file $regexFile";
+loadUserAgentFromFile($uaFile) || die "Cannot load user-agents from file $uaFile";
 
 if (!$debug) {
 	my $pid = fork;
@@ -490,6 +494,7 @@ sub parseXMLConfigFile {
 	undef $dumpAll;
 	undef $compressDump;
 	undef $proxyFile;
+	undef $uaFile;
 	undef $cefDestination;
 	undef $cefPort;
 	undef $cefSeverity;
@@ -533,6 +538,7 @@ sub parseXMLConfigFile {
 		$sampleSize		= $node->find('sample-size')->string_value;
 		$dumpDir		= $node->find('dump-directory')->string_value;
 		$proxyFile		= $node->find('proxy-config')->string_value;
+		$uaFile			= $node->find('ua-config')->string_value;
 		$httpTimeout		= $node->find('http-timeout')->string_value;
 		$distanceMin		= $node->find('distance-min')->string_value;
 		$distanceMaxSize	= $node->find('distance-max-size')->string_value;
@@ -1211,24 +1217,28 @@ sub getPastieID {
 }
 
 #
-# Return a random User-Agent
-# (Feel free to add or create yours)
+# Load User-Agents from file
+#
+sub loadUserAgentFromFile {
+	my $file = shift;
+	return(1) unless defined($file);
+	open(UA_FD, "$file") || die "Cannot open file $file : $!";
+	while(<UA_FD>) {
+		chomp;
+		(length > 0) && push(@uas, $_);
+	}
+	close(UA_FD);
+	(@uas) || die "No User-Agent read from $file";
+	syslogOutput("Loaded " . @uas . " User-Agent from " . $file);
+	return(1);
+}
+
+#
+# Return a random User-Agent from the loaded list
 #
 sub getRandomUA {
-	my @UA = ( 
-		"Mozilla/4.0 (compatible; MSIE 8.0; Windows NT 5.1",
-		"Opera/9.20 (Windows NT 6.0; U; en)",
-		"Googlebot/2.1 ( http://www.googlebot.com/bot.html)",
-		"Mozilla/5.0 (Windows; U; Windows NT 5.1; en-US; rv:1.7.5) Gecko/20060127 Netscape/8.1",
-		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_7_4) AppleWebKit/536.5 (KHTML, like Gecko) Chrome/19.0.1084.56 Safari/536.5",
-		"Mozilla/5.0 (compatible; MSIE 9.0; Windows NT 6.1; Trident/5.0)",
-		"Mozilla/5.0 (iPhone; CPU iPhone OS 5_1_1 like Mac OS X) AppleWebKit/534.46 (KHTML, like Gecko) Version/5.1 Mobile/9B206 Safari/7534.48.3",
-		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10.6; rv:12.0) Gecko/20100101 Firefox/12.0",
-		"Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1; SV1; FunWebProducts; .NET CLR 1.1.4322; PeoplePal 6.2)",
-		"Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:12.0) Gecko/20100101 Firefox/12.0"
-	);
-	my $rnd = rand(@UA);
-	return $UA[$rnd];
+  my $randomIdx = rand($#uas);
+  return $uas[$randomIdx];
 }
 
 # Eof

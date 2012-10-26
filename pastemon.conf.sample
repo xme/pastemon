@@ -10,6 +10,7 @@
                 <regex-file>regex.conf</regex-file>
                 <sample-size>256</sample-size>
                 <proxy-config>proxies.conf</proxy-config>
+		<ua-config>user-agents.conf</ua-config>
                 <dump-directory>/home/pastemon/dump/%Y/%M/%D</dump-directory>
                 <dump-all>yes</dump-all>
 		<compress-pasties>yes</compress-pasties>
