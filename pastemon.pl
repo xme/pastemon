@@ -1191,6 +1191,7 @@ sub validateDumpDir {
 # Extract the pastie from an URL:
 # pastebin.com: pastebin.com/raw.php?i=(XXX)
 # pastie.org: pastie.org/pastes/(XXX)/download
+# pastesite.com: 
 #
 sub getPastieID {
 	my $pastie = shift or return "";
@@ -1198,6 +1199,12 @@ sub getPastieID {
 		return $1;
 	}
 	if ($pastie =~ /pastie\.org\/pastes\/(\d+)\/download/) {
+		return $1;
+	}
+	if ($pastie =~ /pastesite.com\/(\d+)/) {
+		return $1;
+	}
+	if ($pastie =~ /nopaste.me\/raw\/(\w+)/) {
 		return $1;
 	}
 	return "";
