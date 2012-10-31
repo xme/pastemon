@@ -9,6 +9,11 @@ The script can also generate (CEF events).
 More information is available here: 
 http://blog.rootshell.be/2012/01/17/monitoring-pastebin-com-within-your-siem/
 
+v1.14 - 2012/10/31
+------------------
+- [FEATURE] Added SQLite DB support to store pasties details
+  (some fields must still be implemented)
+
 v1.13 - 2012/10/24
 ------------------
 - [CONTRIBUTION] Added support for multiple SMTP recipients (email addresses separared by commas)

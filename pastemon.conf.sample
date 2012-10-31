@@ -65,4 +65,9 @@
                 <password>averystrongpassword</password>
                 <category>favorite</category>
         </wordpress-output>
+
+	<!-- SQLite Support //-->
+	<db-output>
+		<db-file>/home/pastemon/pastemon.db</db-file>
+	</db-output>
 </pastemon>

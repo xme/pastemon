@@ -43,6 +43,7 @@
 use strict;
 use threads;
 use threads::shared;
+use Digest::MD5 qw(md5 md5_hex md5_base64);
 use File::Path; 
 use Getopt::Long;
 use IO::Socket;
@@ -60,6 +61,7 @@ my $haveWordPressXMLRMC 	= eval "use WordPress::XMLRPC; 1";
 my $haveTextJaroWinkler 	= eval "use Text::JaroWinkler qw(strcmp95); 1";
 my $haveIOCompressGzip		= eval "use IO::Compress::Gzip; 1";
 my $haveIOUncompressGunzip	= eval "use IO::Uncompress::Gunzip; 1";
+my $haveDBI			= eval "use DBI; 1";
 
 use constant PROCESS_URL	=> 1;
 use constant PASTEBIN 		=> 0;	# Supported websites
@@ -74,7 +76,7 @@ my @webSiteNames = ( 			# Self-defined names for multiple usages
 	);
 
 my $program = "pastemon.pl";
-my $version = "v1.13";
+my $version = "v1.14";
 my $debug;
 my $help;
 my $ignoreCase;		# By default respect case in strings search
@@ -85,7 +87,7 @@ my $caught = 0;
 my $httpTimeout = 10;	# Default HTTP timeout
 my @pasties;
 my @seenPasties;
-my $maxPasties = 500;
+my $maxPasties = 1000;	# TODO: Make it configurable?
 my @regexList;		# List of interesting regex (with the data)
 my $pidFile 	= "/var/run/pastemon.pid";
 my $configFile	= "/etc/pastemon.conf";		# Main XML configuration file
@@ -131,6 +133,8 @@ my $compressDump;
 my $sampleSize;
 my %matches;
 
+my $dbFile;		# SQLite3 DB file
+
 # Process arguments
 my $result = GetOptions(
 	"debug"			=> \$debug,
@@ -138,6 +142,7 @@ my $result = GetOptions(
 	"config=s"		=> \$configFile,
 );
 
+# TODO: Add a "--drop-sql-table" option to rebuild a fresh DB?
 if ($help) {
 	print <<__HELP__;
 Usage: $0 --config=filepath [--debug] [--help]
@@ -269,6 +274,7 @@ sub analyzePastie {
 	my $pastie = shift or return;
 	my $processUrl = shift;
 	my $regex;
+	my $md5;
 	if (!grep /$pastie/, @seenPasties) {
 		my $content = fetchPastie($pastie);
 		if ($content) {
@@ -278,177 +284,189 @@ sub analyzePastie {
 				sleep(5);
 			}
 			else {
-				undef(%matches);	# Reset the matches regex/counters
-				my $i = 0;
-				my $regexSearch;
-				my $regexInclude;
-				my $regexExclude;
-				my $regexDesc;
-				my $regexCount;
-				foreach $regex (@regexList) {
-					$regexSearch	= @$regex[0];
-					$regexInclude	= @$regex[1];
-					$regexExclude	= @$regex[2];
-					$regexDesc	= @$regex[3];
-					$regexCount	= @$regex[4];
-					my $sampleData;
-					my ($startPos, $endPos);
-					my $preCount = 0;
-					if ($ignoreCase) {
-						$preCount += () = $content =~ /$regexSearch/mgi;
-						$startPos = $-[0];
-						$endPos = $+[0];
-					}
-					else {
-						$preCount += () = $content =~ /$regexSearch/mg;
-						$startPos = $-[0];
-						$endPos = $+[0];
-					}
-					if ($preCount >= $regexCount) {	
-						if ($sampleSize) {
-							# Optional: extract a sample of the data
-							$startPos = (($startPos - $sampleSize) < 0) ? 0 : ($startPos - $sampleSize);
-							$sampleData = encode('UTF8', substr($content, $startPos, ($endPos - $startPos) + $sampleSize));
-						}
-						# Process "include" regex defined
-						if ($regexInclude ne "") {
-							my $postCount = 0;
-							if ($ignoreCase) {
-								$postCount += () = $content =~ /$regexInclude/mgi;
-							} else {
-								$postCount += () = $content =~ /$regexInclude/mg;
-							}
-							if ($postCount) {
-								# Matches for include $regex
-								$matches{$i} = [ ( $regexSearch, $preCount, $sampleData ) ];
-								$i++;
-							}
-						}
-						elsif ($regexExclude ne "") {
-							my $postCount = 0;
-							if ($ignoreCase) {
-								$postCount += () = $content =~ /$regexExclude/mgi;
-							} else {
-								$postCount += () = $content =~ /$regexExclude/mg;
-							}
-							if (! $postCount) {
-								# Matches for exclude $regex
-								$matches{$i} = [ ( $regexSearch, $preCount, $sampleData ) ];
-								$i++;
-							}
+				# Compute the MD5 digest
+				$md5 = md5_hex(encode('UTF8',$content));
+				if (!dbSearchMD5($md5)) { 
+					undef(%matches);	# Reset the matches regex/counters
+					my $i = 0;
+					my $regexSearch;
+					my $regexInclude;
+					my $regexExclude;
+					my $regexDesc;
+					my $regexCount;
+					foreach $regex (@regexList) {
+						$regexSearch	= @$regex[0];
+						$regexInclude	= @$regex[1];
+						$regexExclude	= @$regex[2];
+						$regexDesc	= @$regex[3];
+						$regexCount	= @$regex[4];
+						my $sampleData;
+						my ($startPos, $endPos);
+						my $preCount = 0;
+						if ($ignoreCase) {
+							$preCount += () = $content =~ /$regexSearch/mgi;
+							$startPos = $-[0];
+							$endPos = $+[0];
 						}
 						else {
-							$matches{$i} = [ ( $regexSearch, $preCount, $sampleData ) ];
-							$i++;
+							$preCount += () = $content =~ /$regexSearch/mg;
+							$startPos = $-[0];
+							$endPos = $+[0];
+						}
+						if ($preCount >= $regexCount) {	
+							if ($sampleSize) {
+								# Optional: extract a sample of the data
+								$startPos = (($startPos - $sampleSize) < 0) ? 0 : ($startPos - $sampleSize);
+								$sampleData = encode('UTF8', substr($content, $startPos, ($endPos - $startPos) + $sampleSize));
+							}
+							# Process "include" regex defined
+							if ($regexInclude ne "") {
+								my $postCount = 0;
+								if ($ignoreCase) {
+									$postCount += () = $content =~ /$regexInclude/mgi;
+								} else {
+									$postCount += () = $content =~ /$regexInclude/mg;
+								}
+								if ($postCount) {
+									# Matches for include $regex
+									$matches{$i} = [ ( $regexSearch, $preCount, $sampleData ) ];
+									$i++;
+								}
+							}
+							elsif ($regexExclude ne "") {
+								my $postCount = 0;
+								if ($ignoreCase) {
+									$postCount += () = $content =~ /$regexExclude/mgi;
+								} else {
+									$postCount += () = $content =~ /$regexExclude/mg;
+								}
+								if (! $postCount) {
+									# Matches for exclude $regex
+									$matches{$i} = [ ( $regexSearch, $preCount, $sampleData ) ];
+									$i++;
+								}
+							}
+							else {
+								$matches{$i} = [ ( $regexSearch, $preCount, $sampleData ) ];
+								$i++;
+							}
 						}
 					}
-				}
-				if ($followUrls && $processUrl) {
-					$i += processUrls($content);
-				}
-				if ($i) {
-					# Try to find a corresponding pastie?
-					if (!FuzzyMatch($webSite, $content))
-					{
-						# Generate the results based on matches
-						my $buffer = "Found in " . $pastie . " : ";
-						my $key;
-						for $key (keys %matches) {
-							$buffer = $buffer . $matches{$key}[0] . " (" . $matches{$key}[1] . " times) ";
-						}
-						if ($sampleSize) {
-							# Optional: Add sample of data
-							my $safeData = $matches{0}[2];
-							# Sanitize the data
-							$safeData =~ s///g;
-							$safeData =~ s/\n/\\r/g;
-							$safeData =~ s/\n/\\n/g;
-							$safeData =~ s/\t/\\t/g;
-							$buffer = $buffer . "| Sample: " . $safeData;
-						}
-						syslogOutput($buffer);
-
-						# Generating CEF event (if configured)
-						($cefDestination) && sendCEFEvent($pastie);
+					if ($followUrls && $processUrl) {
+						$i += processUrls($content);
+					}
+					if ($i) {
+						# Try to find a corresponding pastie?
+						if (!FuzzyMatch($webSite, $content))
+						{
+							# Generate the results based on matches
+							my $buffer = "Found in " . $pastie . " : ";
+							my $key;
+							for $key (keys %matches) {
+								$buffer = $buffer . $matches{$key}[0] . " (" . $matches{$key}[1] . " times) ";
+							}
+							if ($sampleSize) {
+								# Optional: Add sample of data
+								my $safeData = $matches{0}[2];
+								# Sanitize the data
+								$safeData =~ s///g;
+								$safeData =~ s/\n/\\r/g;
+								$safeData =~ s/\n/\\n/g;
+								$safeData =~ s/\t/\\t/g;
+								$buffer = $buffer . "| Sample: " . $safeData;
+							}
+							syslogOutput($buffer);
 	
-						# Generating blog post (if configured)
-						($wpSite) && createBlogPost($pastie);
-
-						# Send SMTP notification (if configured)
-						if ($smtpServer) {
-							my $smtp = Net::SMTP->new($smtpServer) or die "Cannot create SMTP connection to $smtpServer: $?";
-							$smtp->mail($smtpFrom);
-							$smtp->recipient(@smtpRecipients, { SkipBad => 1});
-							$smtp->data();
-							my $subjectTags;
-							for $key (keys %matches) {
-								my $tempDesc = getRegexDesc($matches{$key}[0]);
-                                                                if (length($tempDesc) > 0) {
-                                                                        $subjectTags = $subjectTags . '(' . getRegexDesc($matches{$key}[0]) . ') ';
-                                                                }
-							}
-							my $smtpBody = "To: $smtpRecipient\nSubject: $smtpSubject $subjectTags\n\n";
-							for $key (keys %matches) {
-								$smtpBody = $smtpBody . "Matched: " . $matches{$key}[0] . " (" . $matches{$key}[1] . " time(s))\n";
-							}
-							$smtpBody = $smtpBody . "\nSource: " . $pastie . "\n\n" . $content;
-							$smtp->datasend($smtpBody);
-							$smtp->dataend();
-							$smtp->quit();
-						}
-
-						# Save pastie content in the dump directory (if configured)
-						if ($dumpDir) {
-							my $tempPastie = getPastieID($pastie);
-							my $tempDir = validateDumpDir($webSite, $dumpDir); # Generate and create dump directory
-							(-d $tempDir) or die "Cannot validate directory $dumpDir: $!";
-							open(DUMP, ">:encoding(UTF-8)", "$tempDir/$tempPastie.raw") or die "Cannot write to $tempDir/$tempPastie.raw : $!";
-							for $key (keys %matches) {
-								print DUMP "Matched: " . $matches{$key}[0] . " (" . $matches{$key}[1] . " time(s))\n";
-							}
-							print DUMP "\n$content";
-							close(DUMP);
-							if ($compressDump) { # Compress pastie
-								my $in  = "$tempDir/$tempPastie.raw";
-								my $out = "$tempDir/$tempPastie.gz";
-								use IO::Compress::Gzip qw(gzip);
-								if (gzip $in => $out) {
-									unlink("$tempDir/$tempPastie.raw");
+							# Generating CEF event (if configured)
+							($cefDestination) && sendCEFEvent($pastie);
+		
+							# Generating blog post (if configured)
+							($wpSite) && createBlogPost($pastie);
+	
+							# Send SMTP notification (if configured)
+							if ($smtpServer) {
+								my $smtp = Net::SMTP->new($smtpServer) or die "Cannot create SMTP connection to $smtpServer: $?";
+								$smtp->mail($smtpFrom);
+								$smtp->recipient(@smtpRecipients, { SkipBad => 1});
+								$smtp->data();
+								my $subjectTags;
+								for $key (keys %matches) {
+									my $tempDesc = getRegexDesc($matches{$key}[0]);
+	                                                                if (length($tempDesc) > 0) {
+	                                                                        $subjectTags = $subjectTags . '(' . getRegexDesc($matches{$key}[0]) . ') ';
+	                                                                }
 								}
-								else {
-									syslogOutput("Cannot compress $tempDir/$tempPastie.raw: $!");
+								my $smtpBody = "To: $smtpRecipient\nSubject: $smtpSubject $subjectTags\n\n";
+								for $key (keys %matches) {
+									$smtpBody = $smtpBody . "Matched: " . $matches{$key}[0] . " (" . $matches{$key}[1] . " time(s))\n";
+								}
+								$smtpBody = $smtpBody . "\nSource: " . $pastie . "\n\n" . $content;
+								$smtp->datasend($smtpBody);
+								$smtp->dataend();
+								$smtp->quit();
+							}
+	
+							# Save pastie content in the dump directory (if configured)
+							if ($dumpDir) {
+								my $tempPastie = getPastieID($pastie);
+								my $tempDir = validateDumpDir($webSite, $dumpDir); # Generate and create dump directory
+								(-d $tempDir) or die "Cannot validate directory $dumpDir: $!";
+								open(DUMP, ">:encoding(UTF-8)", "$tempDir/$tempPastie.raw") or die "Cannot write to $tempDir/$tempPastie.raw : $!";
+								for $key (keys %matches) {
+									print DUMP "Matched: " . $matches{$key}[0] . " (" . $matches{$key}[1] . " time(s))\n";
+								}
+								print DUMP "\n$content";
+								close(DUMP);
+								if ($compressDump) { # Compress pastie
+									my $in  = "$tempDir/$tempPastie.raw";
+									my $out = "$tempDir/$tempPastie.gz";
+									use IO::Compress::Gzip qw(gzip);
+									if (gzip $in => $out) {
+										unlink("$tempDir/$tempPastie.raw");
+									}
+									else {
+										syslogOutput("Cannot compress $tempDir/$tempPastie.raw: $!");
+									}
 								}
 							}
-						}
-
-					}
-				}
-				elsif ($dumpAll && $dumpDir) {
-					# Mirroring mode - dump the pastie in all cases
-					my $tempPastie = getPastieID($pastie);
-					my $tempDir = validateDumpDir($webSite, $dumpDir);
-					(-d $tempDir) or die "Cannot validate directory $tempDir: $!";
-					open(DUMP, ">:encoding(UTF-8)", "$tempDir/$tempPastie.raw") or die "Cannot write to $tempDir/$tempPastie.raw : $!";
-					print DUMP "\n$content";
-					close(DUMP);
-					if ($compressDump) { # Compress pastie
-						my $in  = "$tempDir/$tempPastie.raw";
-						my $out = "$tempDir/$tempPastie.gz";
-						use IO::Compress::Gzip qw(gzip);
-						if (gzip $in => $out) {
-							unlink("$tempDir/$tempPastie.raw");
-						}
-						else { 
-							syslogOutput("Cannot compress $tempDir/$tempPastie.raw: $!");
+	
 						}
 					}
+					elsif ($dumpAll && $dumpDir) {
+						# Mirroring mode - dump the pastie in all cases
+						my $tempPastie = getPastieID($pastie);
+						my $tempDir = validateDumpDir($webSite, $dumpDir);
+						(-d $tempDir) or die "Cannot validate directory $tempDir: $!";
+						open(DUMP, ">:encoding(UTF-8)", "$tempDir/$tempPastie.raw") or die "Cannot write to $tempDir/$tempPastie.raw : $!";
+						print DUMP "\n$content";
+						close(DUMP);
+						if ($compressDump) { # Compress pastie
+							my $in  = "$tempDir/$tempPastie.raw";
+							my $out = "$tempDir/$tempPastie.gz";
+							use IO::Compress::Gzip qw(gzip);
+							if (gzip $in => $out) {
+								unlink("$tempDir/$tempPastie.raw");
+							}
+							else { 
+								syslogOutput("Cannot compress $tempDir/$tempPastie.raw: $!");
+							}
+						}
+					}
+	
+					# Flag this pastie as "seen"
+					push(@seenPasties, $pastie);
+	
+					# Save pastie data in SQLite
+					if ($dbFile) {
+						dbSavePastie($pastie, $md5);
+					}
+
+					# Wait a random number of seconds to not mess with pastebin.com webmasters
+					sleep(int(rand(5)));
 				}
-
-				# Flag this pastie as "seen"
-				push(@seenPasties, $pastie);
-
-				# Wait a random number of seconds to not mess with pastebin.com webmasters
-				sleep(int(rand(5)));
+				else { # MD5 Exists in DB
+					($debug) && print "DEBUG: MD5 $md5 already found in DB!\n";
+				}
 			}
 		}
 	}
@@ -477,7 +495,10 @@ sub processUrls {
 }
 
 # 
+# parseXMLConfigFile
 # Load the configuration from provided XML file
+# Args:
+# $configFile = Main pastemon.conf XML file
 #
 sub parseXMLConfigFile {
 	my $configFile = shift;
@@ -514,6 +535,7 @@ sub parseXMLConfigFile {
         undef $checkPastesite;
 	undef $followUrls;
 	undef $followMatching;
+	undef $dbFile;
 
 	# Core Parameters
 	my $nodes = $xml->find('/pastemon/core');
@@ -616,6 +638,12 @@ sub parseXMLConfigFile {
 		$smtpSubject		= $node->find('subject')->string_value;
 	}
 
+	# SQLite3 Parameters
+	my $nodes = $xml->find('/pastemon/db-output');
+	foreach my $node ($nodes->get_nodelist) {
+		$dbFile			= $node->find('db-file')->string_value;
+	}
+
 	# ---------------------
 	# Parameters validation
 	# ---------------------
@@ -704,6 +732,36 @@ sub parseXMLConfigFile {
 		else {
 			syslogOutput("Distance configuration disabled: Text::JaroWinkler not installed");
 			undef $distanceMin;
+		}
+	}
+
+	# SQLite3 Output
+	if ($dbFile) {
+		if ($haveDBI) { # Module DBI installed?
+			# Do we have to initialize the DB (first execution)
+			my $dbh = DBI->connect("dbi:SQLite:dbname=" . $dbFile)
+				or die "Cannot connect to the SQLite DB " . $dbFile . "\n";
+			my $sth = $dbh->prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='pasties'");
+			$sth->execute();
+			my $data = $sth->fetch();
+			if (!$data) {	# Tables 'pasties' does not exists. Create it.
+				$sth = $dbh->prepare("CREATE TABLE pasties (id VARCHAR(50),
+										timestamp DATETIME,
+										url VARCHAR(128),
+										matched VARCHAR(256),
+										path VARCHAR(256),
+										md5 VARCHAR(32) PRIMARY KEY,
+										type INTEGER)");
+				$sth->execute() or die "Cannot create table 'pasties'";
+				$sth = $dbh->prepare("CREATE UNIQUE INDEX pasties_idx ON pasties(id)");
+				$sth->execute() or die "Cannot create index 'pasties_idx'";
+				($debug) && print STDERR "+++ Created database " . $dbFile . "\n";
+			}
+			$dbh->disconnect();
+		}
+		else {
+			syslogOutput("DB support disabled: DBI not installed");
+			undef $dbFile;
 		}
 	}
 
@@ -909,7 +967,7 @@ sub loadProxyFromFile {
 #
 sub selectRandomProxy {
 	my $randomIdx = rand($#proxies);
-	($debug) && print STDERR "+++ Using proxy: " . $proxies[$randomIdx] . "\n";
+	# ($debug) && print STDERR "+++ Using proxy: " . $proxies[$randomIdx] . "\n";
 	return $proxies[$randomIdx];
 }
 
@@ -1022,6 +1080,43 @@ sub getRegexDesc {
 		}
 	}
 	return;
+}
+
+#
+# Insert a new pastie in SQLite DB 
+#
+sub dbSavePastie {
+	my $pastie = shift or return;
+	my $md5 = shift or return;
+	my $id= getPastieID($pastie);
+	my $dbh = DBI->connect("dbi:SQLite:dbname=" . $dbFile)
+			or die "Cannot connect to the SQLite DB " . $dbFile . "\n";
+	my $sth = $dbh->prepare("INSERT INTO pasties VALUES(
+					\"$id\",
+					DATETIME('now'),
+					\"$pastie\",
+					\"\",
+					\"\",
+					\"$md5\",
+					0)");
+	if (!$sth->execute()) {
+		syslogOutput("Cannot insert MD5 " . $md5 . " in DB: " . $sth->errstr() . " (Pastie: " . $pastie . ")");
+	}
+	$dbh->disconnect();
+	return;
+}
+
+#
+# Search for a pastie MD5 in SQLite DB
+#
+sub dbSearchMD5 {
+	my $md5 = shift or return;
+	my $dbh = DBI->connect("dbi:SQLite:dbname=" . $dbFile)
+			or die "Cannot connect to the SQLite DB " . $dbFile . "\n";
+	my $sth = $dbh->prepare("SELECT md5 FROM pasties WHERE md5 = \"$md5\"");
+	$sth->execute();
+	$sth->fetchrow();
+	return ($sth->rows() > 0) ? 1 : 0;
 }
 
 #
@@ -1197,7 +1292,7 @@ sub validateDumpDir {
 # Extract the pastie from an URL:
 # pastebin.com: pastebin.com/raw.php?i=(XXX)
 # pastie.org: pastie.org/pastes/(XXX)/download
-# pastesite.com: 
+# pastesite.com:
 #
 sub getPastieID {
 	my $pastie = shift or return "";
@@ -1237,8 +1332,8 @@ sub loadUserAgentFromFile {
 # Return a random User-Agent from the loaded list
 #
 sub getRandomUA {
-  my $randomIdx = rand($#uas);
-  return $uas[$randomIdx];
+	my $randomIdx = rand($#uas);
+	return $uas[$randomIdx];
 }
 
 # Eof
